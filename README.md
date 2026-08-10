@@ -1,9 +1,9 @@
 <p align="center">
-  <img src="banner.png" alt="WeClawBridge" width="720">
+  <img src="assets/banner.png" alt="WeClawBridge" width="720">
 </p>
 
 <h1 align="center">
-  <img src="icon.png" alt="logo" width="96"><br>
+  <img src="assets/icon.png" alt="logo" width="96"><br>
   WeClawBridge
 </h1>
 
