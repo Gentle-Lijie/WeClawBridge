@@ -1,13 +1,15 @@
 #!/usr/bin/env node
 // Launcher for the compiled CLI. Works on Node; the source also runs on Bun/Deno.
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, join } from "node:path";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const entry = join(__dirname, "..", "dist", "cli.js");
+// On Windows, dynamic import() requires a file:// URL, not a bare D:\... path.
+const entryUrl = pathToFileURL(entry).href;
 
 try {
-  await import(entry);
+  await import(entryUrl);
 } catch (err) {
   if (err && (err.code === "ERR_MODULE_NOT_FOUND" || err.code === "MODULE_NOT_FOUND")) {
     process.stderr.write(
