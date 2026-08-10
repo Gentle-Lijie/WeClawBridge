@@ -62,7 +62,7 @@ weclaw start
 ### 方式三：从源码
 
 ```bash
-git clone https://github.com/LijieZhou/WeClawBridge.git
+git clone https://github.com/Gentle-Lijie/WeClawBridge.git
 cd WeClawBridge
 npm install && npm run build
 node bin/weclaw.mjs login
