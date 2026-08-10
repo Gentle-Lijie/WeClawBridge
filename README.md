@@ -1,16 +1,16 @@
 <p align="center">
   <img src="assets/banner.png" alt="WeClawBridge" width="720">
 </p>
-
+<!-- 
 <h1 align="center">
   <img src="assets/icon.png" alt="logo" width="96"><br>
   WeClawBridge
-</h1>
+</h1> -->
 
 <p align="center">
   <a href="https://github.com/Gentle-Lijie/WeClawBridge/actions/workflows/ci.yml"><img src="https://github.com/Gentle-Lijie/WeClawBridge/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://www.npmjs.com/package/weclaw-bridge"><img src="https://img.shields.io/npm/v/weclaw-bridge.svg" alt="npm version"></a>
-  <a href="./LICENSE"><img src="https://img.shields.io/npm/l/weclaw-bridge.svg" alt="license"></a>
+  <a href="./LICENSE"><img src="https://img.shields.io/github/license/Gentle-Lijie/WeClawBridge" alt="license"></a>
 </p>
 
 独立、跨平台的微信 **ClawBot**（iLink）协议桥接 —— **无需安装 openclaw 本体**，即可绑定微信 ClawBot 并把任意指令/消息转发到微信。

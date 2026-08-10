@@ -55,10 +55,16 @@ jobs:
           path: dist/
 
   publish:
-    name: Publish to npm
+    name: Publish to npm (trusted publishing / OIDC)
     needs: build
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    # Trusted publishing uses GitHub OIDC — NO npm token / secret required.
+    # Requires a one-time trusted-publisher registration on npmjs.com
+    # (package → Settings → Publishing access → Trusted publisher):
+    #   repository: Gentle-Lijie/WeClawBridge
+    #   workflow:   .github/workflows/ci.yml
+    #   environment: (leave empty, or create "release")
     permissions:
       contents: read
       id-token: write
@@ -70,7 +76,6 @@ jobs:
         with:
           node-version: "22"
           cache: npm
-          registry-url: "https://registry.npmjs.org"
 
       - name: Install
         env:
@@ -80,7 +85,5 @@ jobs:
       - name: Build
         run: npm run build
 
-      - name: Publish
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: npm publish --access public
+      - name: Publish (OIDC trusted publishing, no token)
+        run: npm publish --provenance --access public
