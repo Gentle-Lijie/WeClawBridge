@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/banner.png" alt="WeClawBridge" width="720">
+  <img src="https://cdn.jsdelivr.net/gh/Gentle-Lijie/WeClawBridge@main/assets/banner.png" alt="WeClawBridge" width="720">
 </p>
 <!-- 
 <h1 align="center">

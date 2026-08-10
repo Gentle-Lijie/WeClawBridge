@@ -1,7 +1,8 @@
 {
   "name": "weclaw-bridge",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Standalone cross-platform bridge for the WeChat ClawBot (iLink) protocol — bind and forward instructions without installing openclaw.",
+  "icon": "https://cdn.jsdelivr.net/gh/Gentle-Lijie/WeClawBridge@main/assets/icon.png",
   "license": "MIT",
   "type": "module",
   "author": "LijieZhou",
