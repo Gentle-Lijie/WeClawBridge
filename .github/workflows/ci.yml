@@ -64,18 +64,23 @@ jobs:
     # (package → Settings → Publishing access → Trusted publisher):
     #   repository: Gentle-Lijie/WeClawBridge
     #   workflow:   .github/workflows/ci.yml
-    #   environment: (leave empty, or create "release")
+    #   environment: (leave empty)
     permissions:
       contents: read
-      id-token: write
+      id-token: write   # OIDC — mandatory for trusted publishing
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup Node 22
+      - name: Setup Node 24
         uses: actions/setup-node@v4
         with:
-          node-version: "22"
-          cache: npm
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+
+      # Trusted publishing requires npm CLI >= 11.5.1 (Node 24 bundles 11.x;
+      # this guarantees a recent enough npm even if the runner lags).
+      - name: Upgrade npm
+        run: npm install -g npm@latest
 
       - name: Install
         env:
