@@ -143,8 +143,9 @@ export async function runHook(): Promise<void> {
     process.exit(0);
   }
 
-  if (event === "Notification" && cfg.notifyNotification) {
-    const text = payload.message ?? "Claude 需要你的输入/确认";
+  if ((event === "Notification" || event === "PermissionRequest") && cfg.notifyNotification) {
+    // Claude Code → Notification; Codex → PermissionRequest (no Notification event).
+    const text = payload.message ?? (payload.tool_name ? `请求权限：${payload.tool_name}` : "Claude/Codex 需要你的输入/确认");
     await maybePush(`🔔 ${text}`, cfg, sid);
     process.exit(0);
   }

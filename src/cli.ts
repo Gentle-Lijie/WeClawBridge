@@ -35,6 +35,7 @@ import {
 } from "./service/install.js";
 import { deployRemote } from "./service/deploy.js";
 import { runHook } from "./hooks/hook.js";
+import { runCodexHook, installCodexHooks, uninstallCodexHooks } from "./hooks/codex.js";
 import { installHooks, uninstallHooks } from "./hooks/install.js";
 import { listSessions } from "./store/sessions.js";
 import { searchArchive } from "./store/archive.js";
@@ -101,8 +102,12 @@ weclaw — standalone WeChat ClawBot bridge (no openclaw required)
     --notify-stop true    claude 停止时把摘要推到微信
     --high-risk "Bash(git push *),Bash(rm -rf *)"  高危工具告警
     --async-rewake false  关闭回合制回复注入
+    --codex true          同时把 Codex CLI notify 写进 ~/.codex/config.toml
 
-  weclaw hook     hooks 分发器入口 (由 Claude Code 自动调用，读 stdin)
+  weclaw hooks codex <install|uninstall>  单独管理 Codex CLI notify 钩子
+
+  weclaw hook        Claude Code hooks 分发器 (由 claude 自动调用，读 stdin)
+  weclaw codex-hook  Codex CLI notify 分发器 (由 codex 自动调用，读 argv)
 
   weclaw deploy  一键把桥接部署到你的服务器 (SSH 进去装、迁凭证、配 HTTPS)
     --ssh user@host        SSH 目标 (必填，或 WECLAW_DEPLOY_SSH)
@@ -204,12 +209,34 @@ function cmdHooks(positional: string[], flags: Record<string, string>): void {
         asyncRewake: flags["async-rewake"] !== "false",
         logger: log,
       });
+      // Optionally also wire Codex CLI's notify hook in the same install.
+      if (flags.codex === "true") {
+        const r = installCodexHooks({
+          highRiskTools: flags["high-risk"] ? flags["high-risk"].split(",").map((s) => s.trim()).filter(Boolean) : [],
+        });
+        log.info(`codex hooks → ${r.file}`);
+      }
       process.stdout.write("\n✅ hooks installed. 让 claude 重新加载会话即可生效。\n");
+      return;
+    }
+    case "codex": {
+      // weclaw hooks codex install|uninstall — manage ~/.codex/hooks.json
+      const action = positional[2] ?? "install";
+      if (action === "uninstall" || action === "remove") {
+        const r = uninstallCodexHooks();
+        process.stdout.write(r.removed > 0 ? `✅ 已从 ${r.file} 移除 ${r.removed} 个 Codex hooks\n` : `${r.file} 中未找到 weclaw hooks\n`);
+        return;
+      }
+      const r = installCodexHooks({
+        highRiskTools: flags["high-risk"] ? flags["high-risk"].split(",").map((s) => s.trim()).filter(Boolean) : [],
+      });
+      process.stdout.write(`✅ Codex hooks 已写入 ${r.file}（SessionStart/Stop/PermissionRequest${flags["high-risk"] ? "/PostToolUse" : ""}）\n`);
       return;
     }
     case "uninstall":
     case "remove":
       uninstallHooks({ global: flags.local !== "true", logger: log });
+      if (flags.codex === "true") uninstallCodexHooks();
       return;
     default:
       process.stderr.write(`未知的 hooks 子命令: ${sub}\n  可用: install | uninstall\n`);
@@ -393,6 +420,8 @@ async function main(): Promise<void> {
       return cmdHooks(positional, flags);
     case "hook":
       return await runHook();
+    case "codex-hook":
+      return await runCodexHook();
     case "send":
       return await cmdSend(flags);
     case "status":
