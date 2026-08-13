@@ -13,7 +13,7 @@
 
 import http from "node:http";
 
-import { touchSession, sessionTag, listSessions } from "../store/sessions.js";
+import { touchSession, sessionTag, listSessions, setActiveSession } from "../store/sessions.js";
 import { routeAndAppend, consumePending } from "../store/pending.js";
 import { Logger } from "../util/log.js";
 import { sleep } from "../util/id.js";
@@ -260,6 +260,10 @@ export class RelayServer {
     this.log.info(`inbound from=${ev.userId}${ev.session ? ` session=${ev.session}` : ""}: ${ev.text.slice(0, 80)}`);
     // Flush any cached outbound now that the link looks alive.
     void this.flushCache();
+    // Mirror /switch to the LOCAL active-session — the server bridge already
+    // handled + replied to the command, but local claude reads local state, so
+    // without this the routing target stays unsynced (relay-mode bug).
+    this.mirrorSwitchCommand(ev);
     // Shared routing logic — identical to what the local bridge does directly.
     const targets = routeAndAppend(ev.accountId, ev.userId, {
       text: ev.text,
@@ -268,6 +272,25 @@ export class RelayServer {
       session: ev.session,
     });
     this.log.info(`inbound routed to session(s): ${targets.join(", ")}`);
+  }
+
+  /** If the inbound is a /switch, apply the same selection to local active-session. */
+  private mirrorSwitchCommand(ev: InboundEvent): void {
+    const m = /^\/switch(?:\s+(.+))?$/.exec(ev.text.trim());
+    if (!m) return;
+    const arg = m[1]?.trim();
+    if (!arg) return; // list-only, no selection
+    const sessions = listSessions();
+    let target: { sessionId: string } | undefined;
+    if (/^\d+$/.test(arg)) {
+      target = sessions[Number(arg) - 1];
+    } else {
+      target = sessions.find((s) => s.sessionId.startsWith(arg));
+    }
+    if (target) {
+      setActiveSession(ev.userId, target.sessionId);
+      this.log.info(`mirrored /switch → local active ${target.sessionId.slice(0, 8)}`);
+    }
   }
 
   /** Retry cached outbound sends once the link is back. */
