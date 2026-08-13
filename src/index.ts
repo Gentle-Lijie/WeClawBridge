@@ -12,9 +12,16 @@ export {
   resolveAccount,
   normalizeAccountId,
   getContextToken,
+  getContextTokenMeta,
+  contextTokenAgeSec,
+  markContextTokenStale,
+  setContextToken,
+  onContextTokenRefresh,
 } from "./store/account.js";
 export { loginWithQr } from "./auth/login.js";
 export { runMonitor, extractText } from "./bridge/monitor.js";
-export { sendText, buildTextMessageReq } from "./bridge/send.js";
+export { sendText, buildTextMessageReq, SendError } from "./bridge/send.js";
 export { BridgeServer } from "./bridge/server.js";
+export { Outbox } from "./bridge/outbox.js";
+export { redact, looksSensitive } from "./util/redact.js";
 export { Logger } from "./util/log.js";

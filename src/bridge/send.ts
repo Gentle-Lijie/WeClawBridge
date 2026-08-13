@@ -2,7 +2,7 @@
 
 import { IlinkClient } from "../ilink/client.js";
 import { MessageItemType, MessageType, MessageState } from "../ilink/types.js";
-import type { SendMessageReq } from "../ilink/types.js";
+import type { SendMessageReq, SendMessageResp } from "../ilink/types.js";
 import { generateClientId } from "../util/id.js";
 
 export interface SendTextParams {
@@ -11,6 +11,35 @@ export interface SendTextParams {
   /** Context token captured from the inbound conversation. */
   contextToken?: string;
   runId?: string;
+}
+
+/** Classification of send failures, so callers can recover (e.g. queue + wait). */
+export type SendErrorKind =
+  | "stale_token" // errcode -14 / token expired → needs re-login or re-capture
+  | "prepare_failed" // ret -2 → missing/invalid context_token, needs user to message first
+  | "rejected" // non-zero ret, transient or permanent server rejection
+  | "network"; // fetch-level failure
+
+export class SendError extends Error {
+  constructor(
+    message: string,
+    public readonly kind: SendErrorKind,
+    public readonly ret?: number,
+    public readonly errcode?: number,
+  ) {
+    super(message);
+    this.name = "SendError";
+  }
+}
+
+/** Map a sendMessage response to a SendErrorKind, or null on success. */
+export function classifySendResp(resp: SendMessageResp): SendErrorKind | null {
+  const retOk = resp.ret === undefined || resp.ret === 0;
+  const errOk = resp.errcode === undefined || resp.errcode === 0;
+  if (retOk && errOk) return null;
+  if (resp.errcode === -14 || resp.ret === -14) return "stale_token";
+  if (resp.ret === -2) return "prepare_failed";
+  return "rejected";
 }
 
 /** Build a SendMessageReq carrying a single text item. */
@@ -39,9 +68,16 @@ export async function sendText(
   params: SendTextParams,
 ): Promise<{ messageId: string }> {
   const req = buildTextMessageReq(params);
-  const resp = await client.sendMessage(req);
-  if (resp.ret && resp.ret !== 0) {
-    throw new Error(`sendMessage ret=${resp.ret} errmsg=${resp.errmsg ?? "(none)"}`);
+  let resp: SendMessageResp;
+  try {
+    resp = await client.sendMessage(req);
+  } catch (err) {
+    throw new SendError(`sendMessage network error: ${String(err)}`, "network");
+  }
+  const kind = classifySendResp(resp);
+  if (kind) {
+    const detail = `ret=${resp.ret} errcode=${resp.errcode ?? "(none)"} errmsg=${resp.errmsg ?? "(none)"}`;
+    throw new SendError(`sendMessage ${kind}: ${detail}`, kind, resp.ret, resp.errcode);
   }
   return { messageId: req.msg.client_id ?? "" };
 }

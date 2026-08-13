@@ -130,6 +130,8 @@ export interface SendMessageReq {
 
 export interface SendMessageResp {
   ret?: number;
+  /** Server error code (mirrors GetUpdatesResp.errcode; e.g. -14 stale token). */
+  errcode?: number;
   errmsg?: string;
 }
 

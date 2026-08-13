@@ -19,13 +19,17 @@ import crypto from "node:crypto";
 import type { AddressInfo } from "node:net";
 
 import { IlinkClient, DEFAULT_BASE_URL } from "../ilink/client.js";
-import { sendText } from "./send.js";
+import { sendText, SendError } from "./send.js";
 import { runMonitor } from "./monitor.js";
+import { Outbox } from "./outbox.js";
+import { redact } from "../util/redact.js";
 import {
   getContextToken,
   listAccountIds,
   loadAccount,
   resolveAccount,
+  markContextTokenStale,
+  contextTokenAgeSec,
 } from "../store/account.js";
 import { Logger } from "../util/log.js";
 
@@ -39,6 +43,8 @@ export interface ServerOptions {
   /** Override base URL / version advertised to iLink. */
   baseUrl?: string;
   channelVersion?: string;
+  /** Disable outbound secret redaction (default: on). */
+  redact?: boolean;
   logger?: Logger;
 }
 
@@ -89,17 +95,19 @@ function resolveTarget(accountId: string, to?: string): string {
 
 export class BridgeServer {
   private readonly opts: Required<
-    Omit<ServerOptions, "apiToken" | "inboundWebhook" | "baseUrl" | "channelVersion" | "logger">
+    Omit<ServerOptions, "apiToken" | "inboundWebhook" | "baseUrl" | "channelVersion" | "redact" | "logger">
   > & {
     apiToken?: string;
     inboundWebhook?: string;
     baseUrl?: string;
     channelVersion?: string;
+    redact: boolean;
     logger: Logger;
   };
   private server?: http.Server;
   private readonly monitors = new Map<string, MonitorHandle>();
   private readonly logins = new Map<string, { client: IlinkClient; qrcode: string }>();
+  private readonly outbox: Outbox;
 
   constructor(opts: ServerOptions = {}) {
     this.opts = {
@@ -109,8 +117,29 @@ export class BridgeServer {
       inboundWebhook: opts.inboundWebhook ?? process.env.WECLAW_INBOUND_WEBHOOK,
       baseUrl: opts.baseUrl,
       channelVersion: opts.channelVersion,
+      redact: opts.redact ?? process.env.WECLAW_NO_REDACT !== "1",
       logger: opts.logger ?? new Logger(),
     };
+    const self = this;
+    this.outbox = new Outbox({
+      logger: this.opts.logger,
+      clientFor: (accountId) => self.clientFor(accountId),
+    });
+  }
+
+  /** Build a fresh iLink client for an account (token may rotate after rebind). */
+  private clientFor(accountId: string): IlinkClient | null {
+    try {
+      const account = resolveAccount(accountId);
+      if (!account.configured) return null;
+      return new IlinkClient({
+        baseUrl: account.baseUrl,
+        token: account.token,
+        channelVersion: this.opts.channelVersion,
+      });
+    } catch {
+      return null;
+    }
   }
 
   // ── lifecycle ────────────────────────────────────────────────────────────────
@@ -259,12 +288,15 @@ export class BridgeServer {
     const accounts = listAccountIds().map((id) => {
       const data = loadAccount(id);
       const mon = this.monitors.get(id);
+      const userId = data?.userId;
       return {
         accountId: id,
         configured: Boolean(data?.token),
-        userId: data?.userId,
+        userId,
         monitorRunning: mon?.running ?? false,
         lastInboundAt: mon?.lastInboundAt ?? null,
+        contextTokenAgeSec: userId ? contextTokenAgeSec(id, userId) : undefined,
+        outboxPending: this.outbox.pending(id),
       };
     });
     return { accounts };
@@ -280,6 +312,11 @@ export class BridgeServer {
     const text = body.text;
     if (typeof text !== "string" || text.length === 0) {
       throw new HttpError(400, "body.text is required (non-empty string)");
+    }
+    // Scrub secrets before anything leaves the process.
+    const redaction = redact(text, { enabled: this.opts.redact });
+    if (redaction.count > 0) {
+      this.opts.logger.warn(`outbound redacted: ${redaction.kinds.join(", ")}`);
     }
     let account;
     try {
@@ -302,10 +339,28 @@ export class BridgeServer {
       channelVersion: this.opts.channelVersion,
     });
     const contextToken = getContextToken(account.accountId, to);
+    const safeText = redaction.text;
     try {
-      const { messageId } = await sendText(client, { to, text, contextToken });
+      const { messageId } = await sendText(client, { to, text: safeText, contextToken });
       return { ok: true, account: account.accountId, to, messageId };
     } catch (err) {
+      if (err instanceof SendError && (err.kind === "prepare_failed" || err.kind === "stale_token")) {
+        // Missing / expired session: park the message and wait for a fresh capture.
+        markContextTokenStale(account.accountId, to, true);
+        const id = this.outbox.enqueue(account.accountId, { to, text: safeText, contextToken }, err.kind);
+        const hint =
+          err.kind === "stale_token"
+            ? "bot token 失效，请运行 `weclaw login` 重新绑定后再发"
+            : "缺少会话凭证；请在手机微信里给 bot 发一条消息建立会话，桥接会自动重发";
+        return {
+          ok: false,
+          queued: true,
+          outboxId: id,
+          reason: err.kind,
+          pending: this.outbox.pending(account.accountId, to),
+          hint,
+        };
+      }
       throw new HttpError(502, `send failed: ${String(err instanceof Error ? err.message : err)}`);
     }
   }

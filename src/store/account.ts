@@ -197,26 +197,101 @@ export function saveSyncBuf(accountId: string, getUpdatesBuf: string): void {
 }
 
 // ── context tokens (per account+user) ─────────────────────────────────────────
+//
+// Storage shape (v2): { userId: { token, capturedAt?, stale? } }
+// Legacy shape (v1): { userId: "<token string>" }  — still readable on load.
+
+export interface ContextTokenEntry {
+  token: string;
+  /** ms epoch when the token was last captured from an inbound message. */
+  capturedAt?: number;
+  /** marked stale after a send failure (-14 / prepare failed); cleared on re-capture. */
+  stale?: boolean;
+}
 
 function contextTokensFilePath(accountId: string): string {
   return path.join(accountsDir(), `${accountId}.context-tokens.json`);
 }
 
-export function loadContextTokens(accountId: string): Record<string, string> {
-  return readJsonIfExists<Record<string, string>>(contextTokensFilePath(accountId)) ?? {};
+/** Normalize a raw loaded value (v1 string or v2 entry) into a v2 entry. */
+function normalizeEntry(raw: unknown): ContextTokenEntry | null {
+  if (typeof raw === "string" && raw.length > 0) return { token: raw };
+  if (raw && typeof raw === "object") {
+    const e = raw as Partial<ContextTokenEntry>;
+    if (typeof e.token === "string" && e.token.length > 0) {
+      return { token: e.token, capturedAt: e.capturedAt, stale: e.stale };
+    }
+  }
+  return null;
+}
+
+export function loadContextTokens(accountId: string): Record<string, ContextTokenEntry> {
+  const raw = readJsonIfExists<Record<string, unknown>>(contextTokensFilePath(accountId)) ?? {};
+  const out: Record<string, ContextTokenEntry> = {};
+  for (const [userId, val] of Object.entries(raw)) {
+    const entry = normalizeEntry(val);
+    if (entry) out[userId] = entry;
+  }
+  return out;
+}
+
+function writeContextTokens(accountId: string, tokens: Record<string, ContextTokenEntry>): void {
+  fs.mkdirSync(accountsDir(), { recursive: true });
+  fs.writeFileSync(contextTokensFilePath(accountId), JSON.stringify(tokens), "utf-8");
+}
+
+/** Listener fired after a token is (re)captured — used by the outbox to retry. */
+type ContextTokenListener = (accountId: string, userId: string, token: string) => void;
+const contextTokenListeners: ContextTokenListener[] = [];
+
+export function onContextTokenRefresh(listener: ContextTokenListener): void {
+  contextTokenListeners.push(listener);
 }
 
 export function setContextToken(accountId: string, userId: string, token: string): void {
   if (!userId || !token) return;
   const tokens = loadContextTokens(accountId);
-  if (tokens[userId] === token) return;
-  tokens[userId] = token;
-  fs.mkdirSync(accountsDir(), { recursive: true });
-  fs.writeFileSync(contextTokensFilePath(accountId), JSON.stringify(tokens), "utf-8");
+  const prev = tokens[userId];
+  // Mark a fresh capture: clear stale, stamp capturedAt only when the token changes.
+  const isRefresh = !prev || prev.token !== token;
+  tokens[userId] = { token, capturedAt: Date.now(), stale: false };
+  writeContextTokens(accountId, tokens);
+  if (isRefresh) {
+    for (const fn of contextTokenListeners) {
+      try {
+        fn(accountId, userId, token);
+      } catch {
+        // listener errors are non-fatal
+      }
+    }
+  }
+}
+
+/** Mark a (account, user) token as stale after a failed send. */
+export function markContextTokenStale(accountId: string, userId: string, stale = true): void {
+  const tokens = loadContextTokens(accountId);
+  const entry = tokens[userId];
+  if (!entry) return;
+  if (entry.stale === stale) return;
+  tokens[userId] = { ...entry, stale };
+  writeContextTokens(accountId, tokens);
 }
 
 export function getContextToken(accountId: string, userId: string): string | undefined {
+  return loadContextTokens(accountId)[userId]?.token;
+}
+
+export interface ContextTokenMeta extends ContextTokenEntry {}
+
+export function getContextTokenMeta(accountId: string, userId: string): ContextTokenMeta | undefined {
   return loadContextTokens(accountId)[userId];
+}
+
+/** Seconds since the token was last captured (undefined if unknown). */
+export function contextTokenAgeSec(accountId: string, userId: string): number | undefined {
+  const capturedAt = loadContextTokens(accountId)[userId]?.capturedAt;
+  if (!capturedAt) return undefined;
+  return Math.max(0, Math.floor((Date.now() - capturedAt) / 1000));
 }
 
 /**
