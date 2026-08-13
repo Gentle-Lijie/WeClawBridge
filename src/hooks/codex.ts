@@ -87,7 +87,7 @@ function hookCommand(): string {
   return `weclaw hook || node ${JSON.stringify(entry)} hook`;
 }
 
-const CODEX_EVENTS = ["SessionStart", "Stop", "PermissionRequest", "PostToolUse"] as const;
+const CODEX_EVENTS = ["SessionStart", "SessionEnd", "Stop", "PermissionRequest", "PostToolUse"] as const;
 
 /**
  * Install weclaw hooks into ~/.codex/hooks.json. Codex's hook system is nearly

@@ -19,7 +19,7 @@ import fs from "node:fs";
 
 import { loadHooksConfig, pushDecision } from "./config.js";
 import { consumePending } from "../store/pending.js";
-import { setSessionLabel } from "../store/sessions.js";
+import { setSessionLabel, forgetSession } from "../store/sessions.js";
 import { sleep } from "../util/id.js";
 
 /**
@@ -149,6 +149,12 @@ export async function runHook(): Promise<void> {
     } catch {
       // non-fatal
     }
+    process.exit(0);
+  }
+
+  // SessionEnd: the claude/codex session exited — drop it so /switch stays clean.
+  if (event === "SessionEnd" && sid) {
+    forgetSession(sid);
     process.exit(0);
   }
 

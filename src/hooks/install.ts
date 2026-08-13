@@ -77,6 +77,7 @@ function buildHooksConfig(opts: InstallHooksOptions): Record<string, MatcherGrou
 
   const groups: Record<string, MatcherGroup[]> = {
     SessionStart: [{ matcher: "", hooks: [{ type: "command", command: cmd }] }],
+    SessionEnd: [{ matcher: "", hooks: [{ type: "command", command: cmd }] }],
     Stop: stopHooks.length > 0 ? [{ matcher: "", hooks: stopHooks }] : [{ matcher: "", hooks: [{ type: "command", command: cmd }] }],
     Notification: [{ matcher: "", hooks: [{ type: "command", command: cmd }] }],
   };
@@ -124,7 +125,7 @@ export function uninstallHooks(opts: { global?: boolean; logger?: Logger }): { f
   const settings = readSettings(file);
   const hooks = (settings.hooks as Record<string, MatcherGroup[]> | undefined) ?? {};
   // Remove only the events we manage.
-  for (const ev of ["SessionStart", "Stop", "Notification", "PostToolUse"]) {
+  for (const ev of ["SessionStart", "SessionEnd", "Stop", "Notification", "PostToolUse"]) {
     delete hooks[ev];
   }
   if (Object.keys(hooks).length === 0) {

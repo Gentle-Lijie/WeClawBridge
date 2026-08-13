@@ -8,7 +8,7 @@
  */
 
 import { listAccountIds, loadAccount, contextTokenAgeSec } from "../store/account.js";
-import { listSessions, setActiveSession, getActiveSession } from "../store/sessions.js";
+import { listSessions, setActiveSession, getActiveSession, forgetSession } from "../store/sessions.js";
 
 export interface InboundEventLike {
   accountId: string;
@@ -51,6 +51,7 @@ export function routeInbound(ev: InboundEventLike, ctx: RouterContext): RouteRes
           "/status   账号 + 监听 + token 新鲜度 + 队列",
           "/accounts 绑定的账号列表",
           "/switch   列出/切换当前活跃 claude 会话",
+          "/clear <序号> 移除一个已退出的会话",
           "/ping     存活检测（回 pong）",
         ].join("\n"),
       };
@@ -85,6 +86,15 @@ export function routeInbound(ev: InboundEventLike, ctx: RouterContext): RouteRes
       if (!target) return { handled: true, reply: `没找到「${arg}」。用 /switch 看序号列表。` };
       setActiveSession(ev.userId, target.sessionId);
       return { handled: true, reply: `已切换到 ${src(target.sessionId)} 会话 ${target.sessionId.slice(0, 14)}。\n后续回复将优先路由给它。` };
+    }
+    case "/clear": {
+      const sessions = listSessions();
+      const idx = Number(rest[0]);
+      if (!idx) return { handled: true, reply: "用法：/clear <序号>（先 /switch 看序号）" };
+      const target = sessions[idx - 1];
+      if (!target) return { handled: true, reply: `无序号 ${idx}` };
+      forgetSession(target.sessionId);
+      return { handled: true, reply: `已移除 ${target.label}` };
     }
     case "/status": {
       const lines = listAccountIds().map((id) => {
