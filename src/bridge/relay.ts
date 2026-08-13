@@ -16,6 +16,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { resolveStateDir } from "../store/account.js";
+import { touchSession, sessionsForUser, sessionTag, listSessions } from "../store/sessions.js";
 import { Logger } from "../util/log.js";
 import { sleep } from "../util/id.js";
 
@@ -28,13 +29,9 @@ export interface RelayOptions {
   port?: number;
   /** Local listen host (default 127.0.0.1). */
   host?: string;
+  /** Prefix pushed messages with a short session tag (default true). */
+  tag?: boolean;
   logger?: Logger;
-}
-
-interface Route {
-  accountId?: string;
-  userId: string;
-  lastSeen: number;
 }
 
 interface InboundEvent {
@@ -51,9 +48,9 @@ export class RelayServer {
   private readonly token?: string;
   private readonly port: number;
   private readonly host: string;
+  private readonly tag: boolean;
   private readonly log: Logger;
   private server?: http.Server;
-  private readonly routes = new Map<string, Route>(); // session_id → route
   private readonly pendingDir: string;
   /** outbound cache when the upstream is unreachable */
   private readonly outCache: { body: string; at: number }[] = [];
@@ -64,6 +61,7 @@ export class RelayServer {
     this.token = opts.token;
     this.port = opts.port ?? (Number(process.env.WECLAW_PORT) || 4789);
     this.host = opts.host ?? "127.0.0.1";
+    this.tag = opts.tag ?? process.env.WECLAW_SESSION_TAG !== "false";
     this.log = opts.logger ?? new Logger();
     this.pendingDir = path.join(resolveStateDir(), "relay", "pending");
     fs.mkdirSync(this.pendingDir, { recursive: true });
@@ -107,7 +105,22 @@ export class RelayServer {
     }
 
     if (p === "/routes" && method === "GET") {
-      return this.sendJson(res, 200, { routes: [...this.routes.entries()].map(([k, v]) => [k, v]) });
+      // session registry (multi-session routing)
+      return this.sendJson(res, 200, { sessions: listSessions() });
+    }
+
+    if (p === "/routes" && method === "POST") {
+      // SessionStart registration: { session, accountId?, userId? }
+      const body = await readBody(req);
+      let parsed: { session?: string; userId?: string; accountId?: string } = {};
+      try {
+        parsed = JSON.parse(body);
+      } catch {
+        return this.sendJson(res, 400, { error: "invalid JSON body" });
+      }
+      if (!parsed.session) return this.sendJson(res, 400, { error: "session required" });
+      const entry = touchSession(parsed.session, { userId: parsed.userId, accountId: parsed.accountId });
+      return this.sendJson(res, 200, { ok: true, label: entry.label });
     }
 
     // Everything else (notably /send, /status, /accounts) is proxied upstream.
@@ -125,16 +138,21 @@ export class RelayServer {
     } catch {
       return this.sendJson(res, 400, { error: "invalid JSON body" });
     }
-    // Learn the session ↔ user route so inbound replies can find their way back.
+    // Register/refresh the session and tag the message so parallel tasks are
+    // distinguishable in WeChat. The tag is added to the body before forwarding.
+    let outBody = body;
     if (parsed.session) {
-      this.routes.set(parsed.session, {
+      const entry = touchSession(parsed.session, {
+        userId: parsed.to,
         accountId: parsed.account,
-        userId: parsed.to ?? "",
-        lastSeen: Date.now(),
       });
+      const tag = sessionTag(entry, this.tag);
+      if (tag && typeof parsed.text === "string") {
+        parsed.text = `${tag}${parsed.text}`;
+        outBody = JSON.stringify(parsed);
+      }
     }
-    // Best-effort local redaction too (defense in depth before it even leaves).
-    const upstream = await this.forward("/send", "POST", body);
+    const upstream = await this.forward("/send", "POST", outBody);
     res.writeHead(upstream.status, upstream.headers);
     res.end(upstream.body);
   }
@@ -247,12 +265,11 @@ export class RelayServer {
     this.log.info(`inbound from=${ev.userId}${ev.session ? ` session=${ev.session}` : ""}: ${ev.text.slice(0, 80)}`);
     // Flush any cached outbound now that the link looks alive.
     void this.flushCache();
-    // Find the session(s) bound to this user/account.
+    // Find the session(s) bound to this WeChat user (multi-session routing).
+    const matched = sessionsForUser(ev.accountId, ev.userId);
     const targets: string[] = [];
     if (ev.session) targets.push(ev.session);
-    for (const [sid, route] of this.routes) {
-      if (route.userId && route.userId === ev.userId) targets.push(sid);
-    }
+    for (const s of matched) targets.push(s.sessionId);
     const dedup = [...new Set(targets)];
     if (dedup.length === 0) {
       this.appendPending("unmatched", ev);

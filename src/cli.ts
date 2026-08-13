@@ -35,6 +35,7 @@ import {
 import { deployRemote } from "./service/deploy.js";
 import { runHook } from "./hooks/hook.js";
 import { installHooks, uninstallHooks } from "./hooks/install.js";
+import { listSessions } from "./store/sessions.js";
 
 interface ParsedArgs {
   command: string;
@@ -292,6 +293,20 @@ function cmdAccounts(): void {
   process.stdout.write(JSON.stringify({ accounts: ids }, null, 2) + "\n");
 }
 
+function cmdSessions(): void {
+  const sessions = listSessions();
+  if (sessions.length === 0) {
+    process.stdout.write("暂无已注册的 claude 会话（会话在首次 /send 或 SessionStart hook 后自动登记）。\n");
+    return;
+  }
+  for (const s of sessions) {
+    const age = Math.round((Date.now() - s.lastActive) / 1000);
+    process.stdout.write(
+      `• [${s.label}] ${s.sessionId}\n    user: ${s.userId ?? "(未绑定)"}  account: ${s.accountId ?? "?"}  活跃: ${age}s 前\n`,
+    );
+  }
+}
+
 function cmdLogout(flags: Record<string, string>): void {
   const ids = listAccountIds();
   if (ids.length === 0) {
@@ -352,6 +367,8 @@ async function main(): Promise<void> {
       return cmdStatus();
     case "accounts":
       return cmdAccounts();
+    case "sessions":
+      return cmdSessions();
     case "logout":
       return cmdLogout(flags);
     case "service":
