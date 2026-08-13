@@ -71,7 +71,7 @@ export function routeInbound(ev: InboundEventLike, ctx: RouterContext): RouteRes
         const active = getActiveSession(ev.userId);
         const lines = sessions.map((s, i) => {
           const mark = s.sessionId === active ? " ← 当前" : "";
-          return `${i + 1}. ${src(s.sessionId)}  ${s.sessionId.slice(0, 14)}${mark}`;
+          return `${i + 1}. ${s.label}  (${src(s.sessionId)})${mark}`;
         });
         return { handled: true, reply: `会话列表：\n${lines.join("\n")}\n用 /switch <序号> 切换` };
       }

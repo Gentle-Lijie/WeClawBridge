@@ -13,7 +13,7 @@
 
 import http from "node:http";
 
-import { touchSession, sessionTag, listSessions, setActiveSession } from "../store/sessions.js";
+import { touchSession, sessionTag, listSessions, setActiveSession, getActiveSession } from "../store/sessions.js";
 import { routeAndAppend, consumePending } from "../store/pending.js";
 import { Logger } from "../util/log.js";
 import { sleep } from "../util/id.js";
@@ -165,7 +165,7 @@ export class RelayServer {
   private async forward(
     pathName: string,
     method: string,
-    body: string | undefined,
+    body?: string,
   ): Promise<{ status: number; headers: Record<string, string>; body: string }> {
     const headers: Record<string, string> = { "content-type": "application/json" };
     if (this.token) headers.authorization = `Bearer ${this.token}`;
@@ -255,16 +255,23 @@ export class RelayServer {
     }
   }
 
-  /** Route an inbound WeChat message to the matching local session's pending file. */
-  private onInbound(ev: InboundEvent): void {
+  /** Inbound from WeChat (via server /events) → command or pending route. */
+  private async onInbound(ev: InboundEvent): Promise<void> {
     this.log.info(`inbound from=${ev.userId}${ev.session ? ` session=${ev.session}` : ""}: ${ev.text.slice(0, 80)}`);
-    // Flush any cached outbound now that the link looks alive.
     void this.flushCache();
-    // Mirror /switch to the LOCAL active-session — the server bridge already
-    // handled + replied to the command, but local claude reads local state, so
-    // without this the routing target stays unsynced (relay-mode bug).
-    this.mirrorSwitchCommand(ev);
-    // Shared routing logic — identical to what the local bridge does directly.
+    // Commands are handled locally (relay is the state source in relay mode).
+    if (ev.text.startsWith("/")) {
+      const reply = await this.handleCommand(ev);
+      if (reply) {
+        try {
+          await this.forward("/send", "POST", JSON.stringify({ text: reply }));
+        } catch (err) {
+          this.log.warn(`command reply failed: ${String(err)}`);
+        }
+      }
+      return;
+    }
+    // Non-command → route to the bound local session's pending.
     const targets = routeAndAppend(ev.accountId, ev.userId, {
       text: ev.text,
       userId: ev.userId,
@@ -274,22 +281,60 @@ export class RelayServer {
     this.log.info(`inbound routed to session(s): ${targets.join(", ")}`);
   }
 
-  /** If the inbound is a /switch, apply the same selection to local active-session. */
-  private mirrorSwitchCommand(ev: InboundEvent): void {
-    const m = /^\/switch(?:\s+(.+))?$/.exec(ev.text.trim());
-    if (!m) return;
-    const arg = m[1]?.trim();
-    if (!arg) return; // list-only, no selection
-    const sessions = listSessions();
-    let target: { sessionId: string } | undefined;
-    if (/^\d+$/.test(arg)) {
-      target = sessions[Number(arg) - 1];
-    } else {
-      target = sessions.find((s) => s.sessionId.startsWith(arg));
+  private async handleCommand(ev: InboundEvent): Promise<string> {
+    const [cmd, ...rest] = ev.text.trim().split(/\s+/);
+    switch (cmd.toLowerCase()) {
+      case "/help":
+        return ["可用指令：", "/help     显示本帮助", "/status   账号+监听+token+队列", "/accounts 绑定账号", "/switch   列出/切换会话", "/ping     存活检测"].join("\n");
+      case "/ping":
+        return "pong";
+      case "/switch":
+        return this.cmdSwitch(ev, rest);
+      case "/status":
+        return await this.proxyJson("/status", (data) => {
+          const accts = (data.accounts as Record<string, unknown>[] | undefined) ?? [];
+          const lines = accts.map((a) =>
+            `• ${a.accountId}\n   monitor: ${a.monitorRunning ? "alive" : "down"}  tokenAge: ${a.contextTokenAgeSec ?? "?"}s  outbox: ${a.outboxPending ?? 0}`);
+          return lines.length ? lines.join("\n") : "(无账号)";
+        });
+      case "/accounts":
+        return await this.proxyJson("/accounts", (data) => {
+          const ids = (data.accounts as string[] | undefined) ?? [];
+          return ids.length ? `已绑定账号：\n${ids.join("\n")}` : "(无账号)";
+        });
+      default:
+        return `未知指令：${cmd}\n试试 /help`;
     }
-    if (target) {
-      setActiveSession(ev.userId, target.sessionId);
-      this.log.info(`mirrored /switch → local active ${target.sessionId.slice(0, 8)}`);
+  }
+
+  /** /switch operates on LOCAL sessions (relay is the state source). */
+  private cmdSwitch(ev: InboundEvent, rest: string[]): string {
+    const sessions = listSessions();
+    if (sessions.length === 0) return "暂无已注册的 claude/codex 会话。";
+    const arg = rest.join(" ").trim();
+    const src = (sid: string) => (sid.startsWith("codex") ? "codex" : "claude");
+    if (!arg) {
+      const active = getActiveSession(ev.userId);
+      const lines = sessions.map((s, i) =>
+        `${i + 1}. ${s.label}  (${src(s.sessionId)})${s.sessionId === active ? " ← 当前" : ""}`);
+      return `会话列表：\n${lines.join("\n")}\n/switch <序号> 切换`;
+    }
+    let target: { sessionId: string; label: string } | undefined;
+    if (/^\d+$/.test(arg)) target = sessions[Number(arg) - 1];
+    else target = sessions.find((s) => s.sessionId.startsWith(arg));
+    if (!target) return `没找到「${arg}」。/switch 看列表。`;
+    setActiveSession(ev.userId, target.sessionId);
+    return `已切换到 ${target.label} (${src(target.sessionId)})。\n后续回复将优先路由给它。`;
+  }
+
+  /** Proxy a GET to the upstream and format the JSON via `fmt`. */
+  private async proxyJson(path: string, fmt: (data: Record<string, unknown>) => string): Promise<string> {
+    const up = await this.forward(path, "GET");
+    if (up.status !== 200) return `查询失败（HTTP ${up.status}）`;
+    try {
+      return fmt(JSON.parse(up.body));
+    } catch {
+      return "解析失败";
     }
   }
 

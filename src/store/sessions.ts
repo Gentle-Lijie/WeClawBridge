@@ -104,6 +104,17 @@ export function getSession(sessionId: string): SessionEntry | undefined {
   return loadAll()[sessionId];
 }
 
+/** Set a human-friendly label (e.g. the renamed title read from a transcript). */
+export function setSessionLabel(sessionId: string, label: string): boolean {
+  const map = loadAll();
+  if (!map[sessionId]) return false;
+  const clean = label.trim().slice(0, 48);
+  if (!clean) return false;
+  map[sessionId].label = clean;
+  saveAll(map);
+  return true;
+}
+
 export function listSessions(): SessionEntry[] {
   return Object.values(loadAll()).sort((a, b) => b.lastActive - a.lastActive);
 }

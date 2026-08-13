@@ -62,6 +62,8 @@ export interface ServerOptions {
   trustProxy?: boolean;
   /** Max /send calls per minute per IP (0 = unlimited). */
   rateLimitPerMin?: number;
+  /** Disable inbox commands + pending writes (relay mode: server is transport only). */
+  inboxDisable?: boolean;
   logger?: Logger;
 }
 
@@ -144,6 +146,7 @@ export class BridgeServer {
       | "allowIps"
       | "trustProxy"
       | "rateLimitPerMin"
+      | "inboxDisable"
       | "logger"
     >
   > & {
@@ -156,6 +159,7 @@ export class BridgeServer {
     allowIps: string[];
     trustProxy: boolean;
     rateLimitPerMin: number;
+    inboxDisable: boolean;
     inboxAllow: string[];
     logger: Logger;
   };
@@ -184,6 +188,7 @@ export class BridgeServer {
       allowIps,
       trustProxy: opts.trustProxy ?? process.env.WECLAW_TRUST_PROXY === "1",
       rateLimitPerMin: opts.rateLimitPerMin ?? (Number(process.env.WECLAW_RATE_LIMIT) || 0),
+      inboxDisable: opts.inboxDisable ?? process.env.WECLAW_INBOX_DISABLE === "1",
       inboxAllow: parseAllowList(process.env.WECLAW_INBOX_ALLOW),
       logger: opts.logger ?? new Logger(),
     };
@@ -311,7 +316,21 @@ export class BridgeServer {
       onInbound: async (event) => {
         handle.lastInboundAt = Date.now();
         archive({ dir: "in", accountId: event.accountId, userId: event.userId, text: event.text });
-        // Command router: /help /status etc. reply directly in WeChat.
+        const session = event.raw.session_id;
+        // Always broadcast to /events subscribers — in relay mode the local
+        // relay handles commands + routing; the server is pure transport.
+        this.broadcast({
+          type: "inbound",
+          accountId: event.accountId,
+          userId: event.userId,
+          text: event.text,
+          timestamp: event.timestamp,
+          session,
+        });
+        if (this.opts.inboxDisable) {
+          return; // relay mode: no command handling, no local pending
+        }
+        // Local-direct mode: command router replies in WeChat directly.
         const route = routeInbound(event, {
           allow: this.opts.inboxAllow,
           monitorInfo: (aid) => {
@@ -328,12 +347,10 @@ export class BridgeServer {
               this.opts.logger.warn(`inbox reply failed: ${String(err)}`);
             }
           }
-          return; // commands are not mirrored to the external webhook
+          return; // commands are not mirrored/routed
         }
-        // Non-command reply from WeChat → route to the bound claude session's
-        // pending file so its asyncRewake/cron hook can inject it. Same logic
-        // the relay uses remotely; here the bridge writes directly.
-        const session = event.raw.session_id;
+        await this.mirrorInbound(event);
+        // Non-command reply → route to the bound claude session's pending.
         const targets = routeAndAppend(event.accountId, event.userId, {
           text: event.text,
           userId: event.userId,
@@ -341,15 +358,6 @@ export class BridgeServer {
           session,
         });
         this.opts.logger.info(`inbound routed to session(s): ${targets.join(", ")}`);
-        this.broadcast({
-          type: "inbound",
-          accountId: event.accountId,
-          userId: event.userId,
-          text: event.text,
-          timestamp: event.timestamp,
-          session,
-        });
-        await this.mirrorInbound(event);
       },
     })
       .catch((err) => this.opts.logger.error(`monitor ${accountId} crashed: ${String(err)}`))

@@ -15,9 +15,38 @@
  * keeping skill/hooks pointed at one place.
  */
 
+import fs from "node:fs";
+
 import { loadHooksConfig, pushDecision } from "./config.js";
 import { consumePending } from "../store/pending.js";
+import { setSessionLabel } from "../store/sessions.js";
 import { sleep } from "../util/id.js";
+
+/**
+ * Read a session's renamed title from its transcript JSONL.
+ * Claude Code writes `{"type":"custom-title","customTitle":"..."}` (from /rename)
+ * and `{"type":"ai-title","aiTitle":"..."}` (auto summary). Custom wins; both
+ * are last-wins. Undocumented format — best-effort, fail soft.
+ */
+function readTranscriptTitle(transcriptPath: string): string | null {
+  let custom: string | null = null;
+  let ai: string | null = null;
+  try {
+    for (const line of fs.readFileSync(transcriptPath, "utf-8").split("\n")) {
+      if (!line.trim()) continue;
+      try {
+        const o = JSON.parse(line) as { type?: string; customTitle?: string; aiTitle?: string };
+        if (o.type === "custom-title" && o.customTitle) custom = String(o.customTitle);
+        else if (o.type === "ai-title" && o.aiTitle) ai = String(o.aiTitle);
+      } catch {
+        // skip malformed line
+      }
+    }
+  } catch {
+    return null;
+  }
+  return custom ?? ai;
+}
 
 /** How long an asyncRewake hook waits for a WeChat reply before giving up.
  *  Kept under the 540s hook timeout so there's room to flush. */
@@ -26,6 +55,8 @@ const ASYNC_REWAKE_WAIT_SEC = 480;
 interface HookPayload {
   hook_event_name?: string;
   session_id?: string;
+  /** Path to the session transcript JSONL (carries the renamed title). */
+  transcript_path?: string;
   /** Stop / SubagentStop carry the last assistant message. */
   last_assistant_message?: string;
   /** Notification carries a message string. */
@@ -99,6 +130,13 @@ export async function runHook(): Promise<void> {
   }
   const event = payload.hook_event_name ?? "";
   const sid = payload.session_id;
+
+  // Auto-pick up the session's renamed title so /switch shows a real name
+  // instead of a short id hash. Runs on every hook that carries a transcript.
+  if (sid && payload.transcript_path) {
+    const title = readTranscriptTitle(payload.transcript_path);
+    if (title) setSessionLabel(sid, title);
+  }
 
   // SessionStart: tell the relay about this session so replies route back.
   if (event === "SessionStart" && sid) {
