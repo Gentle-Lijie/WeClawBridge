@@ -15,6 +15,8 @@ import http from "node:http";
 
 import { touchSession, sessionTag, listSessions, setActiveSession, getActiveSession } from "../store/sessions.js";
 import { routeAndAppend, consumePending } from "../store/pending.js";
+import { loadHooksConfig, defaultHooksConfig } from "../hooks/config.js";
+import { readConfigHtml, saveHooksFromJsonBody } from "./configPage.js";
 import { Logger } from "../util/log.js";
 import { sleep } from "../util/id.js";
 
@@ -31,6 +33,9 @@ export interface RelayOptions {
   tag?: boolean;
   logger?: Logger;
 }
+
+/** Max cached outbound sends kept while the upstream is down (FIFO; oldest dropped). */
+const MAX_OUT_CACHE = 500;
 
 interface InboundEvent {
   type: "inbound";
@@ -90,6 +95,26 @@ export class RelayServer {
 
     if (p === "/health" && method === "GET") {
       return this.sendJson(res, 200, { ok: true, relay: true, upstream: this.remoteUrl });
+    }
+
+    // Config UI + data MUST be served from the LOCAL hooks.json. In relay mode
+    // the local claude/codex hook reads local config, so proxying these to the
+    // server would show/save the server's config and break the local hook.
+    if (p === "/" && method === "GET") {
+      const html = readConfigHtml();
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(html);
+      return;
+    }
+    if (p === "/config" && method === "GET") {
+      const cfg = loadHooksConfig() ?? defaultHooksConfig();
+      return this.sendJson(res, 200, cfg);
+    }
+    if (p === "/config" && method === "POST") {
+      const r = saveHooksFromJsonBody(await readBody(req));
+      if (!r.ok) return this.sendJson(res, r.status, { error: r.error });
+      this.log.info("hooks config updated via /config (local)");
+      return this.sendJson(res, 200, { ok: true });
     }
 
     if (p === "/pending" && method === "GET") {
@@ -188,6 +213,8 @@ export class RelayServer {
       this.log.warn(`upstream ${method} ${pathName} unreachable: ${String(err)}`);
       if (pathName === "/send" && body) {
         this.outCache.push({ body, at: Date.now() });
+        // Bound the cache so a long outage can't exhaust memory; drop oldest.
+        while (this.outCache.length > MAX_OUT_CACHE) this.outCache.shift();
         this.log.info(`cached outbound send (${this.outCache.length} pending)`);
       }
       return {
@@ -214,6 +241,9 @@ export class RelayServer {
         }
         this.log.info(`subscribed to ${url}`);
         backoff = 1_000;
+        // Upstream is reachable again — drain any cached outbound sends that
+        // were parked while the link was down (don't wait for an inbound).
+        void this.flushCache();
         await this.readSSE(resp.body, (ev) => this.onInbound(ev));
       } catch (err) {
         if (this.sseAborted) return;

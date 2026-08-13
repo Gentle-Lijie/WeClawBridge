@@ -16,9 +16,6 @@
 
 import http from "node:http";
 import crypto from "node:crypto";
-import fs from "node:fs";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
 import type { AddressInfo } from "node:net";
 
 import { IlinkClient, DEFAULT_BASE_URL } from "../ilink/client.js";
@@ -29,7 +26,8 @@ import { redact } from "../util/redact.js";
 import { chunkText } from "../util/text.js";
 import { routeInbound, parseAllowList } from "./inbox.js";
 import { archive } from "../store/archive.js";
-import { loadHooksConfig, saveHooksConfig, defaultHooksConfig } from "../hooks/config.js";
+import { loadHooksConfig, defaultHooksConfig } from "../hooks/config.js";
+import { readConfigHtml, saveHooksFromJsonBody } from "./configPage.js";
 import { touchSession } from "../store/sessions.js";
 import { routeAndAppend } from "../store/pending.js";
 import {
@@ -535,7 +533,10 @@ export class BridgeServer {
     }
 
     if (path === "/config" && method === "POST") {
-      return sendJson(res, 200, this.handleConfigSave(await readBody(req)));
+      const r = saveHooksFromJsonBody(await readBody(req));
+      if (!r.ok) throw new HttpError(r.status, r.error);
+      this.opts.logger.info("hooks config updated via /config");
+      return sendJson(res, 200, { ok: true });
     }
 
     if (path === "/routes" && method === "POST") {
@@ -547,6 +548,11 @@ export class BridgeServer {
         return sendJson(res, 400, { error: "invalid JSON body" });
       }
       if (!body.session) return sendJson(res, 400, { error: "session required" });
+      // In relay mode the local relay is the state source; the server must not
+      // keep its own session registry (it would diverge and never be read).
+      if (this.opts.inboxDisable) {
+        return sendJson(res, 200, { ok: true, relay: true, note: "inbox disabled — session not stored" });
+      }
       const entry = touchSession(body.session, { userId: body.userId, accountId: body.accountId });
       return sendJson(res, 200, { ok: true, label: entry.label });
     }
@@ -711,39 +717,5 @@ export class BridgeServer {
     res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
     res.end(html);
   }
-
-  private handleConfigSave(bodyText: string): unknown {
-    let body: Record<string, unknown>;
-    try {
-      body = JSON.parse(bodyText);
-    } catch {
-      throw new HttpError(400, "invalid JSON body");
-    }
-    // Merge onto the EXISTING config so partial saves don't reset other fields.
-    const existing = loadHooksConfig() ?? defaultHooksConfig();
-    const cfg = { ...existing, ...body } as ReturnType<typeof defaultHooksConfig>;
-    // Light validation on types we depend on.
-    if (typeof cfg.target !== "string") throw new HttpError(400, "target must be a string");
-    saveHooksConfig(cfg);
-    this.opts.logger.info("hooks config updated via /config");
-    return { ok: true };
-  }
-}
-
-/** Path to the bundled config page (assets/config.html relative to dist/). */
-function configHtmlPath(): string {
-  const here = path.dirname(fileURLToPath(import.meta.url)); // dist/bridge
-  return path.resolve(here, "..", "..", "assets", "config.html");
-}
-
-let cachedHtml: string | null = null;
-function readConfigHtml(): string {
-  if (cachedHtml != null) return cachedHtml;
-  try {
-    cachedHtml = fs.readFileSync(configHtmlPath(), "utf-8");
-  } catch {
-    cachedHtml = "<!doctype html><meta charset=utf-8><title>weclaw</title><p>config.html not found (run from the installed package).</p>";
-  }
-  return cachedHtml;
 }
 
