@@ -63,21 +63,28 @@ export function routeInbound(ev: InboundEventLike, ctx: RouterContext): RouteRes
     case "/switch": {
       const sessions = listSessions();
       if (sessions.length === 0) {
-        return { handled: true, reply: "暂无已注册的 claude 会话（会话在 claude 首次发送后自动登记）。" };
+        return { handled: true, reply: "暂无已注册的 claude/codex 会话（首次发送后自动登记）。" };
       }
       const arg = rest.join(" ").trim();
+      const src = (sid: string) => (sid.startsWith("codex") ? "codex" : "claude");
       if (!arg) {
         const active = getActiveSession(ev.userId);
-        const lines = sessions.map((s) => {
+        const lines = sessions.map((s, i) => {
           const mark = s.sessionId === active ? " ← 当前" : "";
-          return `[${s.label}] ${s.sessionId.slice(0, 8)}…${mark}`;
+          return `${i + 1}. ${src(s.sessionId)}  ${s.sessionId.slice(0, 14)}${mark}`;
         });
-        return { handled: true, reply: `会话列表：\n${lines.join("\n")}\n用 /switch <标签> 切换` };
+        return { handled: true, reply: `会话列表：\n${lines.join("\n")}\n用 /switch <序号> 切换` };
       }
-      const target = sessions.find((s) => s.label === arg || s.sessionId.startsWith(arg));
-      if (!target) return { handled: true, reply: `没找到标签/前缀为「${arg}」的会话。` };
+      // 选择：序号优先（最可靠），否则按前缀
+      let target: { sessionId: string; label: string } | undefined;
+      if (/^\d+$/.test(arg)) {
+        target = sessions[Number(arg) - 1];
+      } else {
+        target = sessions.find((s) => s.sessionId.startsWith(arg) || s.label === arg);
+      }
+      if (!target) return { handled: true, reply: `没找到「${arg}」。用 /switch 看序号列表。` };
       setActiveSession(ev.userId, target.sessionId);
-      return { handled: true, reply: `已切换到会话 [${target.label}]。\n后续回复将优先路由给它。` };
+      return { handled: true, reply: `已切换到 ${src(target.sessionId)} 会话 ${target.sessionId.slice(0, 14)}。\n后续回复将优先路由给它。` };
     }
     case "/status": {
       const lines = listAccountIds().map((id) => {
