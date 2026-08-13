@@ -583,12 +583,20 @@ export class BridgeServer {
     } catch {
       throw new HttpError(400, "invalid JSON body");
     }
-    const text = body.text;
-    if (typeof text !== "string" || text.length === 0) {
-      throw new HttpError(400, "body.text is required (non-empty string)");
+    // Accept {text}, or fall back to outputting the raw body verbatim when a
+    // third party posts its own fixed schema (e.g. 宝塔/钉钉 send {title,msg,type}
+    // and ignore any custom body config). Lets any webhook source push to WeChat.
+    let textVal = typeof body.text === "string" && body.text.length > 0 ? body.text : "";
+    if (textVal.length === 0) {
+      const raw = JSON.stringify(body, null, 2);
+      if (raw === "{}") {
+        throw new HttpError(400, "body.text is required (or send any JSON to output it verbatim)");
+      }
+      textVal = raw;
+      this.opts.logger.info("send: no text field — outputting raw body verbatim");
     }
     // Scrub secrets before anything leaves the process.
-    const redaction = redact(text, { enabled: this.opts.redact });
+    const redaction = redact(textVal, { enabled: this.opts.redact });
     if (redaction.count > 0) {
       this.opts.logger.warn(`outbound redacted: ${redaction.kinds.join(", ")}`);
     }
