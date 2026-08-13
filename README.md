@@ -24,6 +24,12 @@ WeClawBridge 重新实现了 `@tencent-weixin/openclaw-weixin` 插件所用的 i
 - ✅ **二维码绑定**：终端渲染二维码，手机微信扫码即绑
 - ✅ **Webhook 服务**：`POST /send` 把指令转发给微信用户
 - ✅ **入站监听**：`getUpdates` 长轮询保活，自动捕获 `context_token`
+- ✅ **双向交互（微信 ↔ claude）**：claude 停下时通过 hooks 等待微信回复，回复到达后自动注入继续（asyncRewake）；支持多会话路由与 `/switch` 切换
+- ✅ **Claude Code Hooks**：`weclaw hooks install` 一键注册 Stop / Notification / 高危工具事件，自动推送到微信
+- ✅ **本地 relay / 一键远程部署**：claude 在本地、桥接在服务器时，`weclaw relay` 做双向中继；`weclaw deploy --ssh` 一键把桥接部署到你自己的服务器（装运行时、迁凭证、Caddy HTTPS、systemd）
+- ✅ **推送规则配置面板**：浏览器打开 `weclaw config`，可视化配置事件开关 / 高危工具 / 关键词过滤 / 免打扰时段
+- ✅ **入站指令**：在微信里给 bot 发 `/help` `/status` `/accounts` `/ping` `/switch`，直接收到回复
+- ✅ **自愈与安全**：`context_token` 失效自动入队重发、出站密钥脱敏、IP 白名单、速率限制、消息归档检索
 - ✅ **开机自启**：`weclaw service install` 自动生成 systemd / launchd / 计划任务
 - ✅ **Claude Code Skill**：自带一个自愈型 skill `/weclaw-bridge`
 - ✅ **多账号**：支持绑定多个微信账号
@@ -114,11 +120,18 @@ curl -X POST http://127.0.0.1:4789/send \
 |------|------|
 | `weclaw login` | 终端扫码绑定微信 ClawBot |
 | `weclaw start` | 运行入站监听 + webhook 服务 |
+| `weclaw relay --remote URL` | 本地中继：claude 在本地、桥接在服务器时双向转发 |
+| `weclaw deploy --ssh user@host` | 一键把桥接部署到你的服务器（迁凭证 / Caddy HTTPS / systemd） |
+| `weclaw hooks install` | 注册 Claude Code hooks（Stop/Notification/高危 → 微信，+ asyncRewake 回复注入） |
+| `weclaw hook` | hooks 分发器入口（由 Claude Code 自动调用） |
+| `weclaw config` | 浏览器打开推送规则配置面板 |
 | `weclaw send --text "..."` | 单次把文字转发给微信用户 |
 | `weclaw status` | 列出已绑定账号 |
 | `weclaw accounts` | 以 JSON 列出 accountId |
+| `weclaw sessions` | 列出已注册的 claude 会话（多会话路由） |
+| `weclaw search --query <词>` | 检索消息归档（入站/出站） |
 | `weclaw logout [--account ID]` | 解绑账号 |
-| `weclaw service install` | 安装开机自启服务（systemd / launchd / 计划任务） |
+| `weclaw service install` | 安装开机自启服务（systemd / launchd / 计划任务，支持 `--relay`） |
 | `weclaw service uninstall` | 卸载自启服务 |
 | `weclaw service status` | 查看服务运行状态 |
 | `weclaw service restart` | 重启服务 |
@@ -150,14 +163,19 @@ weclaw service uninstall                               # 卸载
 
 | Method | Path | Body | 说明 |
 |--------|------|------|------|
-| GET | `/health` | — | 存活检查（公开） |
-| GET | `/status` | — | 账号 + 监听状态 |
+| GET | `/` | — | 推送规则配置面板（HTML） |
+| GET | `/health` | — | 存活检查 + monitor/SSE/队列概览（公开） |
+| GET | `/status` | — | 账号 + 监听 + token 新鲜度 + 队列（userId 脱敏） |
 | GET | `/accounts` | — | 列出 accountId |
-| POST | `/send` | `{"text","to"?,"account"?}` | 转发文字到微信 |
-| POST | `/login/start` | — | 拉取二维码，返回 `{qrcodeUrl, sessionKey}` |
+| GET | `/events` | — | SSE 入站消息流（可按 `?accountId`/`?userId`/`?session` 过滤） |
+| GET | `/config` | — | 读取推送规则（hooks.json） |
+| POST | `/config` | `{...}` | 保存推送规则 |
+| POST | `/routes` | `{"session","userId"?,"account"?}` | 注册 claude 会话（SessionStart） |
+| POST | `/send` | `{"text","to"?,"account"?,"session"?}` | 转发文字到微信（自动脱敏/分块；失败入队） |
+| POST | `/login/start` | — | 拉取二维码，返回 `{qrcodeUrl, sessionKey}`（可关闭） |
 | POST | `/login/wait` | `{"sessionKey","verifyCode"?}` | 轮询登录状态 |
 
-鉴权：设置 `WECLAW_API_TOKEN` 后，除 `/health` 外需 `Authorization: Bearer <token>`。
+鉴权：设置 `WECLAW_API_TOKEN` 后，除 `/health`、`/`、`/events` 外需 `Authorization: Bearer <token>`（仅 header，不接受 query）。
 
 错误码：`400` 参数错误 · `401` 未授权 · `404` 未绑定账号 · `409` 账号未配置 · `502` 发送失败（`ret=-2 prepare failed` 多为缺 `context_token`；`errcode=-14` 为 token 失效需重新登录）。
 
@@ -165,11 +183,19 @@ weclaw service uninstall                               # 卸载
 
 | 变量 | 默认 | 说明 |
 |------|------|------|
-| `WECLAW_STATE_DIR` | `~/.weclaw-bridge` | 状态目录（凭证 / sync buf / context token） |
+| `WECLAW_STATE_DIR` | `~/.weclaw-bridge` | 状态目录（凭证 / sync buf / context token / pending / archive） |
 | `WECLAW_PORT` | `4789` | webhook 端口 |
 | `WECLAW_HOST` | `127.0.0.1` | 监听地址 |
 | `WECLAW_API_TOKEN` | — | webhook 写接口的 Bearer token |
 | `WECLAW_INBOUND_WEBHOOK` | — | 把收到的微信消息镜像到该 URL（实现"微信→外部 agent"反向通知） |
+| `WECLAW_DISABLE_LOGIN` | — | `=1` 关闭 `/login/*`（公网部署建议） |
+| `WECLAW_ALLOW_IPS` | — | 非健康检查端点的 IP 白名单（逗号分隔） |
+| `WECLAW_TRUST_PROXY` | — | `=1` 信任 `X-Forwarded-For`（反代后必填） |
+| `WECLAW_RATE_LIMIT` | — | 每个 IP 每分钟 `/send` 上限 |
+| `WECLAW_NO_REDACT` | — | `=1` 关闭出站密钥脱敏 |
+| `WECLAW_INBOX_ALLOW` | — | 入站 `/` 指令的白名单 userId（逗号分隔，空=不限） |
+| `WECLAW_REMOTE_URL` | — | relay 模式的服务器桥接地址 |
+| `WECLAW_SESSION_TAG` | — | `=false` 关闭多会话微信打标 `[xxxx]` |
 | `OPENCLAW_STATE_DIR` | — | 复用已有 openclaw 绑定（可选） |
 | `WECLAW_SKIP_POSTINSTALL` | — | 安装时跳过平台提示横幅 |
 
@@ -260,18 +286,20 @@ deno run --allow-net --allow-read --allow-write --allow-env bin/weclaw.mjs start
 ```
 src/
 ├── ilink/        # 协议层：types + HTTP client
-├── store/        # 账号 / sync buf / context token 持久化
+├── store/        # 账号 / sync buf / context token / sessions / pending / archive
 ├── auth/         # 二维码登录流程
-├── bridge/       # 监听循环 + webhook server + 发送
-├── service/      # systemd/launchd/计划任务 自启管理
-├── util/         # id / logger
+├── bridge/       # 监听循环 + webhook server + 发送 + relay + inbox + outbox
+├── hooks/        # Claude Code hooks 分发器 + 推送规则配置 + 安装器
+├── service/      # systemd/launchd/计划任务 自启管理 + 远程部署
+├── util/         # id / logger / redact / text
 ├── index.ts      # 公共 API
 └── cli.ts        # CLI 入口
 bin/
 ├── weclaw.mjs        # CLI 启动器
 └── postinstall.mjs   # 平台识别 + 自启指引
+assets/config.html    # 推送规则配置面板
 skill/weclaw-bridge/SKILL.md   # Claude Code skill
-.github/workflows/ci.yml       # CI
+.github/workflows/ci.yml       # CI（打 v* tag 自动发布到 npm）
 ```
 
 ## 重要说明
@@ -279,6 +307,57 @@ skill/weclaw-bridge/SKILL.md   # Claude Code skill
 - **首次回复需 context_token**：微信要求回复必须携带入站消息的 `context_token`。绑定后，目标用户需先在微信里给 ClawBot 发过至少一条消息（桥接会自动捕获 token）；或显式传 `--to <xxx@im.wechat>`。
 - 本项目是对公开协议的独立实现，仅用于学习与个人桥接实验。
 - 凭证文件权限设为 `0600`，请勿提交到版本库（`.weclaw/` 已在 `.gitignore`）。
+
+## 双向交互（微信 ↔ claude）
+
+WeClawBridge 不仅是单向推送——claude 可以**等待微信回复并据此继续**。这是通过 Claude Code hooks 的 `asyncRewake` 机制实现的（本地与服务器场景共用同一套 pending 逻辑）。
+
+```bash
+# 1) 在你的项目里注册 hooks（事件推送到微信 + 回合制回复注入）
+weclaw hooks install --local true --target http://127.0.0.1:4789 --notify-stop true --async-rewake true
+
+# 2) 起一个交互式 claude，让它做完一件事后停下等你
+claude
+# > 查一下目录文件数，然后停下来。我会通过微信告诉你下一步，收到后再继续。
+
+# 3) claude 停下 → 微信收到「✅ 任务完成」摘要，asyncRewake 后台等待回复（最多 8 分钟）
+
+# 4) 在手机微信给 bot 回复一句（不要用 / 开头）
+# → 微信收到「✅ 已收到你的回复并送达 claude 会话」回执
+# → claude 在终端被唤醒，把你的回复当作指令继续执行
+```
+
+**多会话**：每个 claude 会话首次 `/send` 时自动登记（绑定到你的微信）。`/switch` 在微信里列出/切换当前活跃会话；非命令回复会路由到当前活跃会话的 pending 队列。
+
+> 注：`asyncRewake` 在 `claude -p`（headless）模式下会在结束时被回收；**双向回复注入需用交互式 `claude` 会话**。
+
+## 推送规则配置面板
+
+```bash
+weclaw config   # 浏览器打开 http://127.0.0.1:4789/
+```
+
+可视化配置（保存到 `~/.weclaw-bridge/hooks.json`，立即生效）：
+- 事件开关：任务完成摘要 / 需要输入确认 / 回合制回复注入
+- 高危工具告警（权限规则语法，如 `Bash(git push *)`）
+- 关键词过滤（仅当包含 / 包含时不推）
+- 免打扰时段（该时段抑制推送，回复注入仍生效）
+
+规则由 `weclaw hook` 分发器在每次事件触发时读取，所以改完即刻生效，无需重装 hooks。
+
+## 远程部署（claude 在本地、桥接在服务器）
+
+```bash
+# 一键部署桥接到你的服务器（SSH 进去装、迁凭证、Caddy HTTPS、systemd）
+weclaw deploy --ssh user@host --domain bridge.example.com --email you@x.com
+
+# 部署完成后，本地用 relay 中继（skill/hooks 仍指向 127.0.0.1，零改动）
+weclaw relay --remote https://bridge.example.com --api-token <部署时生成的 token>
+```
+
+`deploy` 会自动：探测系统 → 装 Node + weclaw-bridge → 原子迁移绑定凭证 → Caddy 反代 + 自动 HTTPS → 生成强 token → systemd 服务（loopback + token + 关闭 login + IP 白名单）→ 回填本地 `remote.env` → 冒烟测试；失败时打印每步的回滚命令。
+
+> ⚠️ 同一 `bot_token` 不能两处同时长轮询。部署是「迁移」：服务器接管 monitor，本地改用 `relay`。`relay` 同时做出站代理（转发 `/send`，断网缓存）与入站订阅（`/events` SSE → 本地 pending），让本地 claude 的双向 hooks 照常工作。
 
 ## 许可证
 

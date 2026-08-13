@@ -6,3 +6,5 @@ dist/
 .env.local
 # Local bound credentials — never commit
 .weclaw/
+# Local Claude Code config (may carry hooks pointing at a local build)
+.claude/

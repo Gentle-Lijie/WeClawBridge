@@ -12,6 +12,7 @@
  */
 
 import process from "node:process";
+import { spawnSync } from "node:child_process";
 
 import { IlinkClient } from "./ilink/client.js";
 import { runInteractiveLogin } from "./auth/login.js";
@@ -115,6 +116,9 @@ weclaw — standalone WeChat ClawBot bridge (no openclaw required)
     --text "..."           要发送的内容 (必填)
     --to USER              目标用户 (xxx@im.wechat)；缺省用绑定时扫码的用户
     --account ID           指定账号 (多账号时必填)
+
+  weclaw config  在浏览器打开推送规则配置面板（事件开关/高危工具/关键词/免打扰）
+    --port N / --host H     指定桥接地址（默认 127.0.0.1:4789）
 
   weclaw status  列出已绑定账号
   weclaw accounts 列出 accountId
@@ -294,6 +298,20 @@ function cmdAccounts(): void {
   process.stdout.write(JSON.stringify({ accounts: ids }, null, 2) + "\n");
 }
 
+function cmdConfig(flags: Record<string, string>): void {
+  const port = flags.port ? Number(flags.port) : Number(process.env.WECLAW_PORT) || 4789;
+  const host = flags.host ?? process.env.WECLAW_HOST ?? "127.0.0.1";
+  const url = `http://${host}:${port}/`;
+  const plat = process.platform;
+  const opener = plat === "darwin" ? "open" : plat === "win32" ? "start" : "xdg-open";
+  process.stdout.write(`配置面板：${url}\n`);
+  try {
+    spawnSync(opener, [url], { stdio: "ignore", shell: plat === "win32" });
+  } catch {
+    process.stdout.write(`（无法自动打开浏览器，请手动访问上面的 URL）\n`);
+  }
+}
+
 function cmdSessions(): void {
   const sessions = listSessions();
   if (sessions.length === 0) {
@@ -387,6 +405,8 @@ async function main(): Promise<void> {
       return cmdSessions();
     case "search":
       return cmdSearch(flags);
+    case "config":
+      return cmdConfig(flags);
     case "logout":
       return cmdLogout(flags);
     case "service":
