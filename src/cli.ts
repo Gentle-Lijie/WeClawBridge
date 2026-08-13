@@ -32,6 +32,7 @@ import {
   serviceStatus,
   serviceRestart,
 } from "./service/install.js";
+import { deployRemote } from "./service/deploy.js";
 
 interface ParsedArgs {
   command: string;
@@ -87,6 +88,14 @@ weclaw — standalone WeChat ClawBot bridge (no openclaw required)
     --api-token T          服务器桥接的 Bearer token
     --port N               本地监听端口 (默认 4789，让 skill/hooks 零改动)
     --host H               本地监听地址 (默认 127.0.0.1)
+
+  weclaw deploy  一键把桥接部署到你的服务器 (SSH 进去装、迁凭证、配 HTTPS)
+    --ssh user@host        SSH 目标 (必填，或 WECLAW_DEPLOY_SSH)
+    --ssh-port N / --ssh_identity FILE
+    --domain D             公网域名 (Caddy 自动 HTTPS；不给则跳过 TLS)
+    --email E              ACME 邮箱
+    --allow-ips IP,IP      服务器 IP 白名单
+    --api-token T          自定义 token (不填则自动生成)
 
   weclaw send    单次把一段文字转发给微信用户
     --text "..."           要发送的内容 (必填)
@@ -161,6 +170,25 @@ async function cmdStart(flags: Record<string, string>): Promise<void> {
   process.on("SIGTERM", () => void shutdown("SIGTERM"));
 
   await server.start();
+}
+
+function cmdDeploy(flags: Record<string, string>): void {
+  const ssh = flags.ssh ?? process.env.WECLAW_DEPLOY_SSH;
+  assert(typeof ssh === "string" && ssh.length > 0, "--ssh user@host 必填（或设 WECLAW_DEPLOY_SSH）");
+  const result = deployRemote({
+    ssh,
+    sshPort: flags["ssh-port"] ? Number(flags["ssh-port"]) : undefined,
+    sshIdentity: flags["ssh-identity"] ?? process.env.WECLAW_DEPLOY_IDENTITY,
+    domain: flags.domain ?? process.env.WECLAW_DEPLOY_DOMAIN,
+    email: flags.email,
+    port: flags.port ? Number(flags.port) : undefined,
+    apiToken: flags["api-token"],
+    allowIps: flags["allow-ips"],
+  });
+  process.stdout.write(
+    "\n" + JSON.stringify({ ok: result.ok, remoteUrl: result.remoteUrl, smoke: result.smoke, error: result.error }, null, 2) + "\n",
+  );
+  if (!result.ok) process.exitCode = 1;
 }
 
 async function cmdRelay(flags: Record<string, string>): Promise<void> {
@@ -272,6 +300,8 @@ async function main(): Promise<void> {
       return await cmdStart(flags);
     case "relay":
       return await cmdRelay(flags);
+    case "deploy":
+      return cmdDeploy(flags);
     case "send":
       return await cmdSend(flags);
     case "status":

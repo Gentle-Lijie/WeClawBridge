@@ -25,4 +25,5 @@ export { BridgeServer } from "./bridge/server.js";
 export { RelayServer } from "./bridge/relay.js";
 export { Outbox } from "./bridge/outbox.js";
 export { redact, looksSensitive } from "./util/redact.js";
+export { deployRemote } from "./service/deploy.js";
 export { Logger } from "./util/log.js";
