@@ -33,6 +33,8 @@ import {
   serviceRestart,
 } from "./service/install.js";
 import { deployRemote } from "./service/deploy.js";
+import { runHook } from "./hooks/hook.js";
+import { installHooks, uninstallHooks } from "./hooks/install.js";
 
 interface ParsedArgs {
   command: string;
@@ -88,6 +90,16 @@ weclaw — standalone WeChat ClawBot bridge (no openclaw required)
     --api-token T          服务器桥接的 Bearer token
     --port N               本地监听端口 (默认 4789，让 skill/hooks 零改动)
     --host H               本地监听地址 (默认 127.0.0.1)
+
+  weclaw hooks <install|uninstall>  注册/移除 Claude Code hooks (双向触发面)
+    --local true          写到项目 ./.claude 而非 ~/.claude
+    --target URL          分发器推送目标 (默认 127.0.0.1:4789，即本地 relay)
+    --token T / --api-token T
+    --notify-stop true    claude 停止时把摘要推到微信
+    --high-risk "Bash(git push *),Bash(rm -rf *)"  高危工具告警
+    --async-rewake false  关闭回合制回复注入
+
+  weclaw hook     hooks 分发器入口 (由 Claude Code 自动调用，读 stdin)
 
   weclaw deploy  一键把桥接部署到你的服务器 (SSH 进去装、迁凭证、配 HTTPS)
     --ssh user@host        SSH 目标 (必填，或 WECLAW_DEPLOY_SSH)
@@ -170,6 +182,34 @@ async function cmdStart(flags: Record<string, string>): Promise<void> {
   process.on("SIGTERM", () => void shutdown("SIGTERM"));
 
   await server.start();
+}
+
+function cmdHooks(positional: string[], flags: Record<string, string>): void {
+  const sub = positional[1] ?? "install";
+  const log = new Logger();
+  switch (sub) {
+    case "install": {
+      installHooks({
+        global: flags.local !== "true", // default global; --local true → project
+        target: flags.target ?? process.env.WECLAW_HOOK_TARGET,
+        token: flags.token ?? flags["api-token"] ?? process.env.WECLAW_API_TOKEN,
+        notifyStop: flags["notify-stop"] === "true",
+        notifyNotification: flags["notify-notification"] !== "false",
+        highRiskTools: flags["high-risk"] ? flags["high-risk"].split(",").map((s) => s.trim()).filter(Boolean) : [],
+        asyncRewake: flags["async-rewake"] !== "false",
+        logger: log,
+      });
+      process.stdout.write("\n✅ hooks installed. 让 claude 重新加载会话即可生效。\n");
+      return;
+    }
+    case "uninstall":
+    case "remove":
+      uninstallHooks({ global: flags.local !== "true", logger: log });
+      return;
+    default:
+      process.stderr.write(`未知的 hooks 子命令: ${sub}\n  可用: install | uninstall\n`);
+      process.exitCode = 1;
+  }
 }
 
 function cmdDeploy(flags: Record<string, string>): void {
@@ -302,6 +342,10 @@ async function main(): Promise<void> {
       return await cmdRelay(flags);
     case "deploy":
       return cmdDeploy(flags);
+    case "hooks":
+      return cmdHooks(positional, flags);
+    case "hook":
+      return await runHook();
     case "send":
       return await cmdSend(flags);
     case "status":
