@@ -12,11 +12,9 @@
  */
 
 import http from "node:http";
-import fs from "node:fs";
-import path from "node:path";
 
-import { resolveStateDir } from "../store/account.js";
-import { touchSession, sessionsForUser, sessionTag, listSessions } from "../store/sessions.js";
+import { touchSession, sessionTag, listSessions } from "../store/sessions.js";
+import { routeAndAppend, consumePending } from "../store/pending.js";
 import { Logger } from "../util/log.js";
 import { sleep } from "../util/id.js";
 
@@ -51,7 +49,6 @@ export class RelayServer {
   private readonly tag: boolean;
   private readonly log: Logger;
   private server?: http.Server;
-  private readonly pendingDir: string;
   /** outbound cache when the upstream is unreachable */
   private readonly outCache: { body: string; at: number }[] = [];
   private sseAborted = false;
@@ -63,8 +60,6 @@ export class RelayServer {
     this.host = opts.host ?? "127.0.0.1";
     this.tag = opts.tag ?? process.env.WECLAW_SESSION_TAG !== "false";
     this.log = opts.logger ?? new Logger();
-    this.pendingDir = path.join(resolveStateDir(), "relay", "pending");
-    fs.mkdirSync(this.pendingDir, { recursive: true });
   }
 
   // ── lifecycle ───────────────────────────────────────────────────────────────
@@ -101,7 +96,7 @@ export class RelayServer {
       // ?session=<sid> → consume (read + clear) pending for that session
       const session = url.searchParams.get("session");
       if (!session) return this.sendJson(res, 400, { error: "?session required" });
-      return this.sendJson(res, 200, this.consumePending(session));
+      return this.sendJson(res, 200, { session, messages: consumePending(session) });
     }
 
     if (p === "/routes" && method === "GET") {
@@ -265,44 +260,14 @@ export class RelayServer {
     this.log.info(`inbound from=${ev.userId}${ev.session ? ` session=${ev.session}` : ""}: ${ev.text.slice(0, 80)}`);
     // Flush any cached outbound now that the link looks alive.
     void this.flushCache();
-    // Find the session(s) bound to this WeChat user (multi-session routing).
-    const matched = sessionsForUser(ev.accountId, ev.userId);
-    const targets: string[] = [];
-    if (ev.session) targets.push(ev.session);
-    for (const s of matched) targets.push(s.sessionId);
-    const dedup = [...new Set(targets)];
-    if (dedup.length === 0) {
-      this.appendPending("unmatched", ev);
-      return;
-    }
-    for (const sid of dedup) this.appendPending(sid, ev);
-  }
-
-  private appendPending(session: string, ev: InboundEvent): void {
-    const file = path.join(this.pendingDir, `${safeName(session)}.jsonl`);
-    const line = JSON.stringify({ ...ev, relayedAt: Date.now() }) + "\n";
-    try {
-      fs.appendFileSync(file, line);
-    } catch (err) {
-      this.log.warn(`failed writing pending for ${session}: ${String(err)}`);
-    }
-  }
-
-  /** Read & clear the pending queue for a session. */
-  private consumePending(session: string): { session: string; messages: InboundEvent[] } {
-    const file = path.join(this.pendingDir, `${safeName(session)}.jsonl`);
-    let messages: InboundEvent[] = [];
-    try {
-      const raw = fs.readFileSync(file, "utf-8");
-      messages = raw
-        .split("\n")
-        .filter((l) => l.trim())
-        .map((l) => JSON.parse(l) as InboundEvent);
-      fs.writeFileSync(file, "");
-    } catch {
-      // no file yet → empty
-    }
-    return { session, messages };
+    // Shared routing logic — identical to what the local bridge does directly.
+    const targets = routeAndAppend(ev.accountId, ev.userId, {
+      text: ev.text,
+      userId: ev.userId,
+      timestamp: ev.timestamp,
+      session: ev.session,
+    });
+    this.log.info(`inbound routed to session(s): ${targets.join(", ")}`);
   }
 
   /** Retry cached outbound sends once the link is back. */
@@ -333,9 +298,4 @@ function readBody(req: http.IncomingMessage): Promise<string> {
     req.on("end", () => resolve(Buffer.concat(chunks).toString("utf-8")));
     req.on("error", reject);
   });
-}
-
-/** Filesystem-safe session id (session_ids are UUIDs, but be safe). */
-function safeName(name: string): string {
-  return name.replace(/[^A-Za-z0-9._:@-]/g, "_").slice(0, 128) || "unmatched";
 }

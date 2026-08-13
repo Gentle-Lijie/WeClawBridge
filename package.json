@@ -31,6 +31,7 @@
     "dist",
     "bin",
     "skill",
+    "assets",
     "README.md",
     "LICENSE"
   ],

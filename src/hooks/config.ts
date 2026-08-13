@@ -26,6 +26,14 @@ export interface HooksConfig {
   highRiskTools: string[];
   /** On Stop, check for a WeChat reply and inject it via asyncRewake (exit 2). */
   asyncRewake: boolean;
+  /** Max chars of the Stop summary to push. */
+  summaryLength?: number;
+  /** Notification matcher subset to forward (empty = all). */
+  notificationMatchers?: string[];
+  /** Keyword filters: include = only push if matched; exclude = never push if matched. */
+  filters?: { includeKeywords?: string[]; excludeKeywords?: string[] };
+  /** Suppress all pushes during a daily window (local time). */
+  quietHours?: { enabled: boolean; start: string; end: string };
 }
 
 const CONFIG_NAME = "hooks.json";
@@ -42,6 +50,10 @@ export function defaultHooksConfig(): HooksConfig {
     notifyNotification: true,
     highRiskTools: [],
     asyncRewake: true,
+    summaryLength: 800,
+    notificationMatchers: [],
+    filters: { includeKeywords: [], excludeKeywords: [] },
+    quietHours: { enabled: false, start: "23:00", end: "07:00" },
   };
 }
 
@@ -63,4 +75,35 @@ export function saveHooksConfig(cfg: HooksConfig): void {
   } catch {
     // best-effort
   }
+}
+
+/** True if the given Date falls inside the configured quiet window. */
+export function inQuietHours(cfg: HooksConfig, now: Date = new Date()): boolean {
+  const q = cfg.quietHours;
+  if (!q?.enabled || !q.start || !q.end) return false;
+  const mins = now.getHours() * 60 + now.getMinutes();
+  const parse = (s: string) => {
+    const [h, m] = s.split(":").map((n) => Number(n) || 0);
+    return h * 60 + m;
+  };
+  const start = parse(q.start);
+  const end = parse(q.end);
+  return start <= end ? mins >= start && mins < end : mins >= start || mins < end;
+}
+
+/** Decide whether a message should be pushed, and why it might be suppressed. */
+export function pushDecision(text: string, cfg: HooksConfig): { push: boolean; reason?: string } {
+  if (inQuietHours(cfg)) {
+    return { push: false, reason: "quiet hours" };
+  }
+  const inc = cfg.filters?.includeKeywords?.filter(Boolean) ?? [];
+  const exc = cfg.filters?.excludeKeywords?.filter(Boolean) ?? [];
+  const low = text.toLowerCase();
+  if (exc.length > 0 && exc.some((k) => low.includes(k.toLowerCase()))) {
+    return { push: false, reason: `exclude keyword` };
+  }
+  if (inc.length > 0 && !inc.some((k) => low.includes(k.toLowerCase()))) {
+    return { push: false, reason: "no include keyword" };
+  }
+  return { push: true };
 }

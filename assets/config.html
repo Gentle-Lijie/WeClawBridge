@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WeClawBridge · 推送规则配置</title>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font: 15px/1.6 -apple-system, "PingFang SC", "Segoe UI", system-ui, sans-serif;
+    background: #f6f5f1; color: #1c1e1b; padding: 32px 16px 64px;
+  }
+  @media (prefers-color-scheme: dark) {
+    body { background: #131719; color: #e8e4d9; }
+    .card { background: #1a1f22; border-color: #2b3135; }
+    input, textarea { background: #21282b; color: #e8e4d9; border-color: #3a4247; }
+    .hint { color: #9da1a0; }
+  }
+  .wrap { max-width: 720px; margin: 0 auto; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  .hint { color: #5c5f59; font-size: 13px; margin-bottom: 24px; }
+  .card {
+    background: #fff; border: 1px solid #e4e0d6; border-radius: 8px;
+    padding: 18px 20px; margin-bottom: 16px;
+  }
+  .card h2 { font-size: 15px; margin: 0 0 14px; letter-spacing: .02em; }
+  .row { display: flex; align-items: center; gap: 10px; margin: 10px 0; }
+  .row label { flex: 1; }
+  .row input[type=text], .row input[type=number], textarea {
+    width: 100%; padding: 7px 10px; border: 1px solid #d4cfc2; border-radius: 5px;
+    font: inherit;
+  }
+  textarea { min-height: 70px; resize: vertical; }
+  .toggle { position: relative; width: 40px; height: 22px; flex: 0 0 auto; }
+  .toggle input { opacity: 0; width: 0; height: 0; }
+  .slider {
+    position: absolute; inset: 0; background: #c8c2b3; border-radius: 22px; transition: .15s;
+  }
+  .slider::before {
+    content: ""; position: absolute; width: 16px; height: 16px; left: 3px; top: 3px;
+    background: #fff; border-radius: 50%; transition: .15s;
+  }
+  .toggle input:checked + .slider { background: #9a5e22; }
+  .toggle input:checked + .slider::before { transform: translateX(18px); }
+  .sub { font-size: 12px; color: #8b8d86; margin-top: 2px; }
+  .actions { display: flex; gap: 10px; align-items: center; margin-top: 8px; }
+  button {
+    background: #9a5e22; color: #fff; border: 0; padding: 9px 20px; border-radius: 6px;
+    font: inherit; cursor: pointer;
+  }
+  button:hover { background: #7d4a18; }
+  button.ghost { background: transparent; color: inherit; border: 1px solid #c8c2b3; }
+  #status { font-size: 13px; }
+  .ok { color: #386b5b; }
+  .err { color: #b23a2c; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>WeClawBridge · 推送规则</h1>
+  <div class="hint">配置哪些情况触发推送、哪些抑制。保存后立即生效（写入 <code>hooks.json</code>，<code>weclaw hook</code> 每次读取）。</div>
+
+  <div class="card">
+    <h2>目标</h2>
+    <div class="row"><label>推送目标 URL<input id="target" type="text" placeholder="http://127.0.0.1:4789"></label></div>
+    <div class="row"><label>Bearer Token（可选）<input id="token" type="text" placeholder="无 token 则留空"></label></div>
+  </div>
+
+  <div class="card">
+    <h2>事件开关</h2>
+    <div class="row">
+      <label><b>任务完成摘要</b>（claude 停止时推送）<div class="sub">Stop → last_assistant_message</div></label>
+      <span class="toggle"><input id="notifyStop" type="checkbox"><span class="slider"></span></span>
+    </div>
+    <div class="row">
+      <label>摘要长度上限<input id="summaryLength" type="number" value="800"></label>
+    </div>
+    <div class="row">
+      <label><b>需要输入/确认</b>（权限请求、空闲等待）<div class="sub">Notification 事件</div></label>
+      <span class="toggle"><input id="notifyNotification" type="checkbox"><span class="slider"></span></span>
+    </div>
+    <div class="row">
+      <label><b>回合制回复注入</b>（asyncRewake，微信回复→claude）<div class="sub">Stop 时检查 pending</div></label>
+      <span class="toggle"><input id="asyncRewake" type="checkbox"><span class="slider"></span></span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>高危工具告警</h2>
+    <div class="sub" style="margin-bottom:8px">每行一条，权限规则语法，如 <code>Bash(git push *)</code>、<code>Bash(rm -rf *)</code></div>
+    <textarea id="highRiskTools" placeholder="Bash(git push *)&#10;Bash(rm -rf *)"></textarea>
+  </div>
+
+  <div class="card">
+    <h2>关键词过滤</h2>
+    <div class="grid2">
+      <label>仅当包含这些词时推送（逗号分隔，留空=不限）<input id="includeKeywords" type="text" placeholder="error, 失败, done"></label>
+      <label>包含这些词时不推送（逗号分隔）<input id="excludeKeywords" type="text" placeholder="debug, typing"></label>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>免打扰时段</h2>
+    <div class="row">
+      <label>启用免打扰</label>
+      <span class="toggle"><input id="quietEnabled" type="checkbox"><span class="slider"></span></span>
+    </div>
+    <div class="grid2">
+      <label>开始<input id="quietStart" type="text" value="23:00" placeholder="HH:MM"></label>
+      <label>结束<input id="quietEnd" type="text" value="07:00" placeholder="HH:MM"></label>
+    </div>
+    <div class="sub">该时段内（本地时间）所有推送被抑制；微信回复注入仍生效。</div>
+  </div>
+
+  <div class="actions">
+    <button id="save">保存</button>
+    <button id="reload" class="ghost">重新加载</button>
+    <span id="status"></span>
+  </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+function lines(v){ return (v||"").split("\n").map(s=>s.trim()).filter(Boolean); }
+function csv(v){ return (v||"").split(",").map(s=>s.trim()).filter(Boolean); }
+
+function fill(cfg){
+  $("target").value = cfg.target || "";
+  $("token").value = cfg.token || "";
+  $("notifyStop").checked = !!cfg.notifyStop;
+  $("summaryLength").value = cfg.summaryLength ?? 800;
+  $("notifyNotification").checked = !!cfg.notifyNotification;
+  $("asyncRewake").checked = !!cfg.asyncRewake;
+  $("highRiskTools").value = (cfg.highRiskTools || []).join("\n");
+  $("includeKeywords").value = (cfg.filters?.includeKeywords || []).join(",");
+  $("excludeKeywords").value = (cfg.filters?.excludeKeywords || []).join(",");
+  $("quietEnabled").checked = !!cfg.quietHours?.enabled;
+  $("quietStart").value = cfg.quietHours?.start || "23:00";
+  $("quietEnd").value = cfg.quietHours?.end || "07:00";
+}
+function collect(){
+  return {
+    target: $("target").value.trim() || "http://127.0.0.1:4789",
+    token: $("token").value.trim() || undefined,
+    notifyStop: $("notifyStop").checked,
+    summaryLength: Number($("summaryLength").value) || 800,
+    notifyNotification: $("notifyNotification").checked,
+    asyncRewake: $("asyncRewake").checked,
+    highRiskTools: lines($("highRiskTools").value),
+    filters: {
+      includeKeywords: csv($("includeKeywords").value),
+      excludeKeywords: csv($("excludeKeywords").value),
+    },
+    quietHours: {
+      enabled: $("quietEnabled").checked,
+      start: $("quietStart").value.trim() || "23:00",
+      end: $("quietEnd").value.trim() || "07:00",
+    },
+  };
+}
+async function authHeaders(){
+  const h = { "content-type": "application/json" };
+  // If the page was loaded with ?token=, use it (for token-protected bridges).
+  const t = new URL(location.href).searchParams.get("token");
+  if (t) h.authorization = "Bearer " + t;
+  return h;
+}
+function show(msg, cls){ const s = $("status"); s.textContent = msg; s.className = cls; }
+async function load(){
+  try {
+    const r = await fetch("/config", { headers: await authHeaders() });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    fill(await r.json());
+    show("已加载当前配置", "ok");
+  } catch(e){ show("加载失败：" + e.message, "err"); }
+}
+async function save(){
+  try {
+    const r = await fetch("/config", {
+      method: "POST", headers: await authHeaders(), body: JSON.stringify(collect())
+    });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    show("✅ 已保存，立即生效", "ok");
+  } catch(e){ show("保存失败：" + e.message, "err"); }
+}
+$("save").onclick = save;
+$("reload").onclick = load;
+load();
+</script>
+</body>
+</html>

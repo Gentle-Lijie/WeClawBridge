@@ -15,11 +15,8 @@
  * keeping skill/hooks pointed at one place.
  */
 
-import fs from "node:fs";
-import path from "node:path";
-
-import { loadHooksConfig } from "./config.js";
-import { resolveStateDir } from "../store/account.js";
+import { loadHooksConfig, pushDecision } from "./config.js";
+import { consumePending } from "../store/pending.js";
 
 interface HookPayload {
   hook_event_name?: string;
@@ -33,12 +30,6 @@ interface HookPayload {
   tool_input?: Record<string, unknown>;
 }
 
-interface PendingMsg {
-  text: string;
-  userId?: string;
-  timestamp?: number;
-}
-
 function readStdin(): Promise<string> {
   return new Promise((resolve) => {
     let data = "";
@@ -48,26 +39,6 @@ function readStdin(): Promise<string> {
     // Safety: if stdin is a TTY (no payload), resolve empty.
     if (process.stdin.isTTY) resolve("");
   });
-}
-
-function pendingFile(sessionId: string): string {
-  const safe = sessionId.replace(/[^A-Za-z0-9._:@-]/g, "_").slice(0, 128) || "unmatched";
-  return path.join(resolveStateDir(), "relay", "pending", `${safe}.jsonl`);
-}
-
-/** Read & clear the pending queue for a session. */
-function consumePending(sessionId: string): PendingMsg[] {
-  const file = pendingFile(sessionId);
-  try {
-    const raw = fs.readFileSync(file, "utf-8");
-    fs.writeFileSync(file, "");
-    return raw
-      .split("\n")
-      .filter((l) => l.trim())
-      .map((l) => JSON.parse(l) as PendingMsg);
-  } catch {
-    return [];
-  }
 }
 
 async function pushToWeChat(target: string, token: string | undefined, text: string, session?: string): Promise<void> {
@@ -84,6 +55,17 @@ async function pushToWeChat(target: string, token: string | undefined, text: str
   } catch (err) {
     process.stderr.write(`weclaw hook: push failed (${String(err)})\n`);
   }
+}
+
+/** Apply quiet-hours + keyword filters before pushing. Returns whether it sent. */
+async function maybePush(text: string, cfg: { target: string; token?: string }, sid?: string): Promise<boolean> {
+  const decision = pushDecision(text, cfg as never);
+  if (!decision.push) {
+    process.stderr.write(`weclaw hook: suppressed (${decision.reason})\n`);
+    return false;
+  }
+  await pushToWeChat(cfg.target, cfg.token, text, sid);
+  return true;
 }
 
 function ruleMatches(rule: string, toolName: string, toolInput: Record<string, unknown>): boolean {
@@ -129,8 +111,8 @@ export async function runHook(): Promise<void> {
 
   if (event === "Stop") {
     if (cfg.notifyStop && payload.last_assistant_message) {
-      const summary = payload.last_assistant_message.slice(0, 800);
-      await pushToWeChat(cfg.target, cfg.token, `✅ 任务完成：\n${summary}`, sid);
+      const summary = payload.last_assistant_message.slice(0, cfg.summaryLength ?? 800);
+      await maybePush(`✅ 任务完成：\n${summary}`, cfg, sid);
     }
     if (cfg.asyncRewake && sid) {
       const pending = consumePending(sid);
@@ -148,7 +130,7 @@ export async function runHook(): Promise<void> {
 
   if (event === "Notification" && cfg.notifyNotification) {
     const text = payload.message ?? "Claude 需要你的输入/确认";
-    await pushToWeChat(cfg.target, cfg.token, `🔔 ${text}`, sid);
+    await maybePush(`🔔 ${text}`, cfg, sid);
     process.exit(0);
   }
 
@@ -156,7 +138,7 @@ export async function runHook(): Promise<void> {
     const hit = cfg.highRiskTools.find((r) => ruleMatches(r, payload.tool_name!, payload.tool_input ?? {}));
     if (hit) {
       const cmd = String(payload.tool_input?.command ?? payload.tool_input?.cmd ?? payload.tool_name);
-      await pushToWeChat(cfg.target, cfg.token, `⚠️ 高危操作已执行：${hit}\n${String(cmd).slice(0, 200)}`, sid);
+      await maybePush(`⚠️ 高危操作已执行：${hit}\n${String(cmd).slice(0, 200)}`, cfg, sid);
     }
     process.exit(0);
   }

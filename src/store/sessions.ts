@@ -27,6 +27,36 @@ function sessionsPath(): string {
   return path.join(resolveStateDir(), "sessions.json");
 }
 
+function activePath(): string {
+  return path.join(resolveStateDir(), "active-session.json");
+}
+
+/** Map of WeChat userId → the claude session_id currently "active" for replies. */
+function loadActive(): Record<string, string> {
+  try {
+    return JSON.parse(fs.readFileSync(activePath(), "utf-8")) as Record<string, string>;
+  } catch {
+    return {};
+  }
+}
+
+function saveActive(map: Record<string, string>): void {
+  fs.mkdirSync(resolveStateDir(), { recursive: true });
+  fs.writeFileSync(activePath(), JSON.stringify(map, null, 2), "utf-8");
+}
+
+/** Set the active claude session for a WeChat user (used by /switch). */
+export function setActiveSession(userId: string, sessionId: string): void {
+  const map = loadActive();
+  map[userId] = sessionId;
+  saveActive(map);
+}
+
+/** Get the active claude session for a WeChat user, if any. */
+export function getActiveSession(userId: string): string | undefined {
+  return loadActive()[userId];
+}
+
 function shortLabel(sessionId: string): string {
   // session_ids are UUIDs; take the first hex run for a compact tag.
   const m = /[0-9a-f]{4}/i.exec(sessionId);

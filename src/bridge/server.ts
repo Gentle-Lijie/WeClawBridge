@@ -16,6 +16,9 @@
 
 import http from "node:http";
 import crypto from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import type { AddressInfo } from "node:net";
 
 import { IlinkClient, DEFAULT_BASE_URL } from "../ilink/client.js";
@@ -26,6 +29,9 @@ import { redact } from "../util/redact.js";
 import { chunkText } from "../util/text.js";
 import { routeInbound, parseAllowList } from "./inbox.js";
 import { archive } from "../store/archive.js";
+import { loadHooksConfig, saveHooksConfig, defaultHooksConfig } from "../hooks/config.js";
+import { touchSession } from "../store/sessions.js";
+import { routeAndAppend } from "../store/pending.js";
 import {
   getContextToken,
   listAccountIds,
@@ -324,7 +330,17 @@ export class BridgeServer {
           }
           return; // commands are not mirrored to the external webhook
         }
+        // Non-command reply from WeChat → route to the bound claude session's
+        // pending file so its asyncRewake/cron hook can inject it. Same logic
+        // the relay uses remotely; here the bridge writes directly.
         const session = event.raw.session_id;
+        const targets = routeAndAppend(event.accountId, event.userId, {
+          text: event.text,
+          userId: event.userId,
+          timestamp: event.timestamp,
+          session,
+        });
+        this.opts.logger.info(`inbound routed to session(s): ${targets.join(", ")}`);
         this.broadcast({
           type: "inbound",
           accountId: event.accountId,
@@ -476,6 +492,13 @@ export class BridgeServer {
       });
     }
 
+    // Config UI is public so a browser can load it; the /config data endpoints
+    // below still require auth. (Trusted-local use; put it behind a token + IP
+    // allowlist for public deployments.)
+    if (path === "/" && method === "GET") {
+      return this.serveConfigPage(res);
+    }
+
     // IP allowlist gate (everything past health).
     if (!this.ipAllowed(ip)) {
       return sendJson(res, 403, { error: "forbidden" });
@@ -491,6 +514,15 @@ export class BridgeServer {
 
     if (path === "/accounts" && method === "GET") {
       return sendJson(res, 200, { accounts: listAccountIds() });
+    }
+
+    if (path === "/config" && method === "GET") {
+      const cfg = loadHooksConfig() ?? defaultHooksConfig();
+      return sendJson(res, 200, cfg);
+    }
+
+    if (path === "/config" && method === "POST") {
+      return sendJson(res, 200, this.handleConfigSave(await readBody(req)));
     }
 
     if (path === "/send" && method === "POST") {
@@ -532,7 +564,7 @@ export class BridgeServer {
   }
 
   private async handleSend(bodyText: string): Promise<unknown> {
-    let body: { text?: string; to?: string; account?: string };
+    let body: { text?: string; to?: string; account?: string; session?: string };
     try {
       body = JSON.parse(bodyText);
     } catch {
@@ -561,6 +593,10 @@ export class BridgeServer {
       to = resolveTarget(account.accountId, body.to);
     } catch (err) {
       throw new HttpError(400, String(err instanceof Error ? err.message : err));
+    }
+    // Learn the claude session ↔ WeChat user binding so inbound replies route back.
+    if (typeof body.session === "string" && body.session) {
+      touchSession(body.session, { userId: to, accountId: account.accountId });
     }
     const client = new IlinkClient({
       baseUrl: account.baseUrl,
@@ -633,4 +669,47 @@ export class BridgeServer {
     const status = await entry.client.getQrcodeStatus(entry.qrcode, body.verifyCode, 30_000);
     return { status: status.status };
   }
+
+  // ── config UI ───────────────────────────────────────────────────────────────
+
+  private serveConfigPage(res: http.ServerResponse): void {
+    const html = readConfigHtml();
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    res.end(html);
+  }
+
+  private handleConfigSave(bodyText: string): unknown {
+    let body: Record<string, unknown>;
+    try {
+      body = JSON.parse(bodyText);
+    } catch {
+      throw new HttpError(400, "invalid JSON body");
+    }
+    // Merge onto the EXISTING config so partial saves don't reset other fields.
+    const existing = loadHooksConfig() ?? defaultHooksConfig();
+    const cfg = { ...existing, ...body } as ReturnType<typeof defaultHooksConfig>;
+    // Light validation on types we depend on.
+    if (typeof cfg.target !== "string") throw new HttpError(400, "target must be a string");
+    saveHooksConfig(cfg);
+    this.opts.logger.info("hooks config updated via /config");
+    return { ok: true };
+  }
 }
+
+/** Path to the bundled config page (assets/config.html relative to dist/). */
+function configHtmlPath(): string {
+  const here = path.dirname(fileURLToPath(import.meta.url)); // dist/bridge
+  return path.resolve(here, "..", "..", "assets", "config.html");
+}
+
+let cachedHtml: string | null = null;
+function readConfigHtml(): string {
+  if (cachedHtml != null) return cachedHtml;
+  try {
+    cachedHtml = fs.readFileSync(configHtmlPath(), "utf-8");
+  } catch {
+    cachedHtml = "<!doctype html><meta charset=utf-8><title>weclaw</title><p>config.html not found (run from the installed package).</p>";
+  }
+  return cachedHtml;
+}
+
