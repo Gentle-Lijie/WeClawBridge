@@ -108,9 +108,13 @@ export function listSessions(): SessionEntry[] {
   return Object.values(loadAll()).sort((a, b) => b.lastActive - a.lastActive);
 }
 
-/** Find sessions bound to a given WeChat userId (for inbound routing). */
+/** Find sessions bound to a given WeChat userId (for inbound routing).
+ *  A session with no recorded accountId matches any account (it was registered
+ *  without one, e.g. via a hook /send that omitted `account`). */
 export function sessionsForUser(accountId: string | undefined, userId: string): SessionEntry[] {
-  return listSessions().filter((s) => s.userId === userId && (!accountId || s.accountId === accountId));
+  return listSessions().filter(
+    (s) => s.userId === userId && (!accountId || !s.accountId || s.accountId === accountId),
+  );
 }
 
 export function forgetSession(sessionId: string): void {

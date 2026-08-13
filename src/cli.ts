@@ -12,6 +12,7 @@
  */
 
 import process from "node:process";
+import { spawnSync } from "node:child_process";
 
 import { IlinkClient } from "./ilink/client.js";
 import { runInteractiveLogin } from "./auth/login.js";
@@ -106,8 +107,7 @@ weclaw — standalone WeChat ClawBot bridge (no openclaw required)
   weclaw deploy  一键把桥接部署到你的服务器 (SSH 进去装、迁凭证、配 HTTPS)
     --ssh user@host        SSH 目标 (必填，或 WECLAW_DEPLOY_SSH)
     --ssh-port N / --ssh_identity FILE
-    --domain D             公网域名 (Caddy 自动 HTTPS；不给则跳过 TLS)
-    --email E              ACME 邮箱
+    --domain D             公网域名 (nginx 反代；TLS 由你在服务器侧配置)
     --allow-ips IP,IP      服务器 IP 白名单
     --api-token T          自定义 token (不填则自动生成)
 
@@ -115,6 +115,9 @@ weclaw — standalone WeChat ClawBot bridge (no openclaw required)
     --text "..."           要发送的内容 (必填)
     --to USER              目标用户 (xxx@im.wechat)；缺省用绑定时扫码的用户
     --account ID           指定账号 (多账号时必填)
+
+  weclaw config  在浏览器打开推送规则配置面板（事件开关/高危工具/关键词/免打扰）
+    --port N / --host H     指定桥接地址（默认 127.0.0.1:4789）
 
   weclaw status  列出已绑定账号
   weclaw accounts 列出 accountId
@@ -222,7 +225,6 @@ function cmdDeploy(flags: Record<string, string>): void {
     sshPort: flags["ssh-port"] ? Number(flags["ssh-port"]) : undefined,
     sshIdentity: flags["ssh-identity"] ?? process.env.WECLAW_DEPLOY_IDENTITY,
     domain: flags.domain ?? process.env.WECLAW_DEPLOY_DOMAIN,
-    email: flags.email,
     port: flags.port ? Number(flags.port) : undefined,
     apiToken: flags["api-token"],
     allowIps: flags["allow-ips"],
@@ -292,6 +294,20 @@ function cmdStatus(): void {
 function cmdAccounts(): void {
   const ids = listAccountIds();
   process.stdout.write(JSON.stringify({ accounts: ids }, null, 2) + "\n");
+}
+
+function cmdConfig(flags: Record<string, string>): void {
+  const port = flags.port ? Number(flags.port) : Number(process.env.WECLAW_PORT) || 4789;
+  const host = flags.host ?? process.env.WECLAW_HOST ?? "127.0.0.1";
+  const url = `http://${host}:${port}/`;
+  const plat = process.platform;
+  const opener = plat === "darwin" ? "open" : plat === "win32" ? "start" : "xdg-open";
+  process.stdout.write(`配置面板：${url}\n`);
+  try {
+    spawnSync(opener, [url], { stdio: "ignore", shell: plat === "win32" });
+  } catch {
+    process.stdout.write(`（无法自动打开浏览器，请手动访问上面的 URL）\n`);
+  }
 }
 
 function cmdSessions(): void {
@@ -387,6 +403,8 @@ async function main(): Promise<void> {
       return cmdSessions();
     case "search":
       return cmdSearch(flags);
+    case "config":
+      return cmdConfig(flags);
     case "logout":
       return cmdLogout(flags);
     case "service":

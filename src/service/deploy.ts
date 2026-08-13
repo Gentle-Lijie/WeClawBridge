@@ -2,13 +2,14 @@
  * One-shot remote deployment: `weclaw deploy --ssh user@host`.
  *
  * Orchestrates the whole server-side setup so a user with SSH access ends up
- * with a hardened, HTTPS-fronted bridge their local relay can talk to:
+ * with a hardened, nginx-fronted bridge their local relay can talk to:
  *
- *   1. probe the host (OS, node, caddy)
+ *   1. probe the host (OS, node, nginx)
  *   2. install Node ≥ 18 + weclaw-bridge
  *   3. atomically transfer bound credentials (local keeps a copy; server takes
  *      over the long-poll — never run the monitor in two places)
- *   4. front it with Caddy (auto-HTTPS when --domain is given)
+ *   4. drop an nginx vhost reverse-proxying the domain to the loopback bridge
+ *      (HTTP now; TLS is the operator's job — panel one-click or certbot)
  *   5. generate a strong API token, install a systemd service (loopback + token
  *      + login disabled + allow-list)
  *   6. write back local remote.env (WECLAW_REMOTE_URL + token) so the relay
@@ -34,12 +35,10 @@ export interface DeployOptions {
   sshPort?: number;
   /** Extra ssh flags/identity, passed verbatim. */
   sshIdentity?: string;
-  /** Public domain for Caddy auto-HTTPS. Omit to skip TLS (Tailscale/tunnel use). */
+  /** Public domain for the nginx reverse proxy. TLS is configured separately by the operator. */
   domain?: string;
   /** Internal bridge port on the server (default 4789). */
   port?: number;
-  /** Email for Caddy ACME. */
-  email?: string;
   /** Pre-existing API token; generated if omitted. */
   apiToken?: string;
   /** Comma-separated IP allowlist forwarded to the server. */
@@ -93,13 +92,16 @@ export function deployRemote(opts: DeployOptions): DeployResult {
     }
 
     // ── 1. probe ────────────────────────────────────────────────────────────
-    const probe = ssh("probe host", "cat /etc/os-release 2>/dev/null | head -1; echo ---; node --version 2>/dev/null; echo ---; which caddy 2>/dev/null; echo ---; which apt-get 2>/dev/null");
+    const probe = ssh("probe host", "cat /etc/os-release 2>/dev/null | head -1; echo ---; node --version 2>/dev/null; echo ---; which nginx 2>/dev/null; echo ---; which apt-get 2>/dev/null; echo ---; ls -d /etc/nginx/conf.d /www/server/panel/vhost/nginx 2>/dev/null");
     const osId = /VERSION_CODENAME|^ID="?([a-z0-9]+)"?/im.exec(probe.stdout);
     const hasNode = /v(\d+)\./.test(probe.stdout);
     const nodeMajor = hasNode ? Number(/v(\d+)\./.exec(probe.stdout)?.[1]) : 0;
-    const hasCaddy = probe.stdout.includes("/caddy");
+    const hasNginx = probe.stdout.includes("/nginx");
     const hasApt = probe.stdout.includes("/apt-get");
-    log.info(`host: ${opts.ssh} | os=${osId?.[1] ?? "?"} | node=${nodeMajor || "absent"} | caddy=${hasCaddy} | apt=${hasApt}`);
+    const vhostDir = probe.stdout.includes("/www/server/panel/vhost/nginx")
+      ? "/www/server/panel/vhost/nginx"
+      : "/etc/nginx/conf.d";
+    log.info(`host: ${opts.ssh} | os=${osId?.[1] ?? "?"} | node=${nodeMajor || "absent"} | nginx=${hasNginx} | vhost=${vhostDir} | apt=${hasApt}`);
 
     if (!hasApt) {
       throw new DeployStepError("probe", "目标系统未检测到 apt-get。当前 deploy 仅自动支持 Debian/Ubuntu；其余发行版请手动安装 Node 与 weclaw-bridge 后重试。");
@@ -118,22 +120,43 @@ export function deployRemote(opts: DeployOptions): DeployResult {
     ssh("verify credentials on host", "test -f ~/.weclaw-bridge/openclaw-weixin/accounts.json && weclaw accounts");
     rollback.push(`ssh ${opts.ssh} 'rm -rf ~/.weclaw-bridge/openclaw-weixin'`);
 
-    // ── 4. caddy front (auto-HTTPS if domain) ───────────────────────────────
+    // ── 4. nginx reverse proxy (HTTP now; SSL configured by user) ───────────
+    // We don't force a TLS stack — most servers already run nginx (often behind
+    // a panel like 宝塔). We drop a vhost that reverse-proxies the domain to the
+    // loopback bridge, leaving TLS to the operator (panel one-click / certbot).
     if (remoteUrl && opts.domain) {
-      if (!hasCaddy) {
-        ssh("install caddy", "sudo apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl && curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg && curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | sudo tee /etc/apt/sources.list.d/caddy-stable.list && sudo apt-get update && sudo apt-get install -y caddy");
-        rollback.push(`ssh ${opts.ssh} 'sudo apt-get purge -y caddy'`);
+      if (!hasNginx) {
+        ssh("install nginx", "sudo apt-get install -y nginx");
+        rollback.push(`ssh ${opts.ssh} 'sudo apt-get purge -y nginx'`);
       }
-      const emailLine = opts.email ? `\n  encode zstd gzip` : "";
-      const caddyfile = `${opts.domain} {${emailLine}
-  reverse_proxy 127.0.0.1:${port}
-}`;
-      // Write Caddyfile via a heredoc over ssh.
-      ssh("write Caddyfile", `echo ${shellQuote(caddyfile)} | sudo tee /etc/caddy/Caddyfile >/dev/null`);
-      ssh("reload caddy", "sudo systemctl enable --now caddy; sudo systemctl reload caddy || sudo systemctl restart caddy");
-      rollback.push(`ssh ${opts.ssh} 'sudo rm -f /etc/caddy/Caddyfile; sudo systemctl restart caddy'`);
+      const nginxConf = `# weclaw-bridge reverse proxy (generated by \`weclaw deploy\`)
+server {
+    listen 80;
+    server_name ${opts.domain};
+    location / {
+        proxy_pass http://127.0.0.1:${port};
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_buffering off;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+}
+`;
+      const confPath = `${vhostDir}/weclaw-bridge.conf`;
+      ssh("write nginx vhost", `echo ${shellQuote(nginxConf)} | sudo tee ${confPath} >/dev/null`);
+      ssh("nginx -t + reload", "sudo nginx -t && sudo systemctl reload nginx");
+      rollback.push(`ssh ${opts.ssh} 'sudo rm -f ${confPath}; sudo systemctl reload nginx'`);
+      log.warn(
+        `SSL 未配置：vhost ${confPath} 现为 HTTP 反代。请在服务器上为 ${opts.domain} 配置 TLS（面板一键 / certbot），并把 443 的反代指向 127.0.0.1:${port}。`,
+      );
     } else {
-      log.warn("未提供 --domain，跳过 TLS/反代。桥接只监听 loopback；请用 Tailscale 或反向隧道暴露，否则本地 relay 无法到达。");
+      log.warn("未提供 --domain，跳过反代。桥接只监听 loopback；请用 Tailscale 或反向隧道暴露，否则本地 relay 无法到达。");
     }
 
     // ── 5. systemd service on host (loopback + token + login disabled) ──────
