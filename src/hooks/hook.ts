@@ -17,6 +17,11 @@
 
 import { loadHooksConfig, pushDecision } from "./config.js";
 import { consumePending } from "../store/pending.js";
+import { sleep } from "../util/id.js";
+
+/** How long an asyncRewake hook waits for a WeChat reply before giving up.
+ *  Kept under the 540s hook timeout so there's room to flush. */
+const ASYNC_REWAKE_WAIT_SEC = 480;
 
 interface HookPayload {
   hook_event_name?: string;
@@ -115,15 +120,25 @@ export async function runHook(): Promise<void> {
       await maybePush(`✅ 任务完成：\n${summary}`, cfg, sid);
     }
     if (cfg.asyncRewake && sid) {
-      const pending = consumePending(sid);
-      if (pending.length > 0) {
-        // asyncRewake: stderr becomes a system reminder injected into Claude.
-        const body = pending
-          .map((m, i) => `${i + 1}. ${m.text}`)
-          .join("\n");
-        process.stderr.write(`[微信回复，请据此继续]\n${body}\n`);
-        process.exit(2); // wake the idle session with the reminder
+      // asyncRewake: the hook runs in the background after Stop. Poll the
+      // pending file until a WeChat reply lands (or the wait window elapses),
+      // then inject it as a system reminder via exit 2.
+      const deadline = Date.now() + ASYNC_REWAKE_WAIT_SEC * 1000;
+      process.stderr.write(`weclaw hook: 等待微信回复（最多 ${ASYNC_REWAKE_WAIT_SEC}s）…\n`);
+      while (Date.now() < deadline) {
+        const pending = consumePending(sid);
+        if (pending.length > 0) {
+          const body = pending
+            .map((m, i) => `${i + 1}. ${m.text}`)
+            .join("\n");
+          // Receipt: tell the user their reply reached the claude session.
+          await maybePush(`✅ 已收到你的回复并送达 claude 会话：\n${body.slice(0, 120)}`, cfg);
+          process.stderr.write(`[微信回复，请据此继续]\n${body}\n`);
+          process.exit(2); // wake the idle session with the reminder
+        }
+        await sleep(1500);
       }
+      process.stderr.write(`weclaw hook: ${ASYNC_REWAKE_WAIT_SEC}s 内未收到回复，放弃注入。\n`);
     }
     process.exit(0);
   }

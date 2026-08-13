@@ -525,6 +525,19 @@ export class BridgeServer {
       return sendJson(res, 200, this.handleConfigSave(await readBody(req)));
     }
 
+    if (path === "/routes" && method === "POST") {
+      // SessionStart registration: { session, userId?, accountId? }
+      let body: { session?: string; userId?: string; accountId?: string };
+      try {
+        body = JSON.parse(await readBody(req));
+      } catch {
+        return sendJson(res, 400, { error: "invalid JSON body" });
+      }
+      if (!body.session) return sendJson(res, 400, { error: "session required" });
+      const entry = touchSession(body.session, { userId: body.userId, accountId: body.accountId });
+      return sendJson(res, 200, { ok: true, label: entry.label });
+    }
+
     if (path === "/send" && method === "POST") {
       if (!this.rateLimitOk(ip)) {
         return sendJson(res, 429, { error: "rate limit exceeded" });
