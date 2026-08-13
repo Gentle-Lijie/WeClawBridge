@@ -386,9 +386,14 @@ export class BridgeServer {
 
   private authorized(req: http.IncomingMessage): boolean {
     if (!this.opts.apiToken) return true;
-    // Header-only — never accept a token via query string (leaks into logs).
+    // Bearer header (preferred — doesn't leak into logs) …
     const header = req.headers.authorization ?? "";
-    return header.startsWith("Bearer ") && header.slice(7).trim() === this.opts.apiToken;
+    if (header.startsWith("Bearer ") && header.slice(7).trim() === this.opts.apiToken) return true;
+    // … or ?token= for sources that can't set headers (some webhook panels,
+    // EventSource clients). NOTE: query tokens land in access logs / browser
+    // history — prefer the header where the client supports it.
+    const url = new URL(req.url ?? "/", "http://localhost");
+    return url.searchParams.get("token") === this.opts.apiToken;
   }
 
   /** Best-effort client IP, honoring X-Forwarded-For when trusted. */
