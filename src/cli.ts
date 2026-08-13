@@ -76,6 +76,10 @@ weclaw — standalone WeChat ClawBot bridge (no openclaw required)
     --host H               监听地址 (默认 127.0.0.1)
     --api-token T          保护写接口的 Bearer token (默认 WECLAW_API_TOKEN)
     --inbound-webhook URL  把入站消息镜像到该 URL (默认 WECLAW_INBOUND_WEBHOOK)
+    --disable-login true   关闭 /login/* 端点 (公网部署建议)
+    --allow-ips IP,IP      非健康检查端点的 IP 白名单 (逗号分隔)
+    --trust-proxy true     信任 X-Forwarded-For (反代后必填)
+    --rate-limit N         每个 IP 每分钟 /send 上限 (0=不限)
 
   weclaw send    单次把一段文字转发给微信用户
     --text "..."           要发送的内容 (必填)
@@ -92,12 +96,18 @@ weclaw — standalone WeChat ClawBot bridge (no openclaw required)
 环境变量:
   WECLAW_STATE_DIR         状态目录 (默认 ~/.weclaw-bridge)
   WECLAW_PORT / WECLAW_HOST / WECLAW_API_TOKEN / WECLAW_INBOUND_WEBHOOK
+  WECLAW_DISABLE_LOGIN=1   关闭 /login/* (公网部署)
+  WECLAW_ALLOW_IPS=IP,IP   IP 白名单
+  WECLAW_TRUST_PROXY=1     信任 X-Forwarded-For (反代后)
+  WECLAW_RATE_LIMIT=N      每 IP 每分钟 /send 上限
+  WECLAW_NO_REDACT=1       关闭出站脱敏
   OPENCLAW_STATE_DIR       复用已有 openclaw 绑定 (可选)
 
 webhook 接口 (start 后可用):
-  GET  /health
-  GET  /status
-  GET  /accounts
+  GET  /health               存活 + monitor/SSE/队列概览 (公开)
+  GET  /status               账号 + 监听 + token 新鲜度 + 队列
+  GET  /accounts             列出 accountId
+  GET  /events               SSE 入站消息流 (可按 ?accountId / ?userId / ?session 过滤)
   POST /send            { "text": "...", "to"?, "account"? }
   POST /login/start     → { qrcodeUrl, qrcodePayload, sessionKey }
   POST /login/wait      { "sessionKey", "verifyCode"? }
@@ -128,6 +138,10 @@ async function cmdStart(flags: Record<string, string>): Promise<void> {
     inboundWebhook: flags["inbound-webhook"],
     baseUrl: flags["base-url"],
     channelVersion: flags["channel-version"],
+    disableLogin: flags["disable-login"] === "true" ? true : undefined,
+    allowIps: flags["allow-ips"] ? flags["allow-ips"].split(",").map((s) => s.trim()).filter(Boolean) : undefined,
+    trustProxy: flags["trust-proxy"] === "true" ? true : undefined,
+    rateLimitPerMin: flags["rate-limit"] ? Number(flags["rate-limit"]) : undefined,
     logger: log,
   });
 

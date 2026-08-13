@@ -45,6 +45,14 @@ export interface ServerOptions {
   channelVersion?: string;
   /** Disable outbound secret redaction (default: on). */
   redact?: boolean;
+  /** Disable the /login/* endpoints (set for public deployments). */
+  disableLogin?: boolean;
+  /** Comma-separated CIDR/IP allowlist for non-health endpoints. */
+  allowIps?: string[];
+  /** Trust X-Forwarded-For (when behind a reverse proxy). */
+  trustProxy?: boolean;
+  /** Max /send calls per minute per IP (0 = unlimited). */
+  rateLimitPerMin?: number;
   logger?: Logger;
 }
 
@@ -53,6 +61,20 @@ interface MonitorHandle {
   controller: AbortController;
   running: boolean;
   lastInboundAt: number | null;
+}
+
+interface SseClient {
+  res: http.ServerResponse;
+  filter: { accountId?: string; userId?: string; session?: string };
+}
+
+interface InboundBroadcast {
+  type: "inbound";
+  accountId: string;
+  userId: string;
+  text: string;
+  timestamp?: number;
+  session?: string;
 }
 
 function readBody(req: http.IncomingMessage): Promise<string> {
@@ -93,23 +115,53 @@ function resolveTarget(accountId: string, to?: string): string {
   return userId;
 }
 
+/** Mask an id like `abcdef1234@im.wechat` → `abcdef…@im.wechat`. */
+function maskId(id: string): string {
+  const at = id.indexOf("@");
+  if (at <= 4) return id;
+  return `${id.slice(0, 6)}…${id.slice(at)}`;
+}
+
 export class BridgeServer {
   private readonly opts: Required<
-    Omit<ServerOptions, "apiToken" | "inboundWebhook" | "baseUrl" | "channelVersion" | "redact" | "logger">
+    Omit<
+      ServerOptions,
+      | "apiToken"
+      | "inboundWebhook"
+      | "baseUrl"
+      | "channelVersion"
+      | "redact"
+      | "disableLogin"
+      | "allowIps"
+      | "trustProxy"
+      | "rateLimitPerMin"
+      | "logger"
+    >
   > & {
     apiToken?: string;
     inboundWebhook?: string;
     baseUrl?: string;
     channelVersion?: string;
     redact: boolean;
+    disableLogin: boolean;
+    allowIps: string[];
+    trustProxy: boolean;
+    rateLimitPerMin: number;
     logger: Logger;
   };
   private server?: http.Server;
   private readonly monitors = new Map<string, MonitorHandle>();
   private readonly logins = new Map<string, { client: IlinkClient; qrcode: string }>();
   private readonly outbox: Outbox;
+  private readonly sseClients = new Set<SseClient>();
+  private ssePing?: NodeJS.Timeout;
+  /** rate limiter: ip → { windowStart, count } */
+  private readonly rlBuckets = new Map<string, { start: number; count: number }>();
 
   constructor(opts: ServerOptions = {}) {
+    const allowIps =
+      opts.allowIps ??
+      (process.env.WECLAW_ALLOW_IPS ? process.env.WECLAW_ALLOW_IPS.split(",").map((s) => s.trim()).filter(Boolean) : []);
     this.opts = {
       port: (opts.port ?? Number(process.env.WECLAW_PORT)) || 4789,
       host: (opts.host ?? process.env.WECLAW_HOST) || "127.0.0.1",
@@ -118,6 +170,10 @@ export class BridgeServer {
       baseUrl: opts.baseUrl,
       channelVersion: opts.channelVersion,
       redact: opts.redact ?? process.env.WECLAW_NO_REDACT !== "1",
+      disableLogin: opts.disableLogin ?? process.env.WECLAW_DISABLE_LOGIN === "1",
+      allowIps,
+      trustProxy: opts.trustProxy ?? process.env.WECLAW_TRUST_PROXY === "1",
+      rateLimitPerMin: opts.rateLimitPerMin ?? (Number(process.env.WECLAW_RATE_LIMIT) || 0),
       logger: opts.logger ?? new Logger(),
     };
     const self = this;
@@ -145,6 +201,14 @@ export class BridgeServer {
   // ── lifecycle ────────────────────────────────────────────────────────────────
 
   async start(): Promise<void> {
+    const host = this.opts.host;
+    const isPublicHost = host !== "127.0.0.1" && host !== "localhost" && host !== "::1";
+    if (isPublicHost && !this.opts.apiToken) {
+      this.opts.logger.warn(
+        `⚠️ 监听在公网地址 ${host} 但未设置 WECLAW_API_TOKEN — /send 将对任意调用者开放。强烈建议设置 token。`,
+      );
+    }
+
     // Boot a monitor for each bound account.
     for (const id of listAccountIds()) {
       void this.startMonitor(id).catch((err: unknown) =>
@@ -153,6 +217,14 @@ export class BridgeServer {
     }
 
     this.server = http.createServer((req, res) => {
+      // SSE needs raw socket handling; everything else goes through handle().
+      const url = new URL(req.url ?? "/", "http://localhost");
+      if (url.pathname.replace(/\/+$/, "") === "/events" && (req.method ?? "GET") === "GET") {
+        this.handleEvents(req, res).catch((err: unknown) =>
+          this.opts.logger.error(`/events error: ${String(err)}`),
+        );
+        return;
+      }
       this.handle(req, res).catch((err: unknown) => {
         if (err instanceof HttpError) {
           sendJson(res, err.status, { error: err.message });
@@ -168,9 +240,34 @@ export class BridgeServer {
     });
     const addr = this.server.address() as AddressInfo;
     this.opts.logger.info(`webhook server listening on http://${addr.address}:${addr.port}`);
+
+    // Keep SSE connections warm with a periodic comment ping.
+    const ssePing = setInterval(() => {
+      if (this.sseClients.size === 0) return;
+      for (const c of this.sseClients) {
+        try {
+          c.res.write(": ping\n\n");
+        } catch {
+          this.sseClients.delete(c);
+        }
+      }
+    }, 25_000);
+    this.ssePing = ssePing;
+    this.opts.logger.info(
+      `hardening: redact=${this.opts.redact} disableLogin=${this.opts.disableLogin} allowIps=${this.opts.allowIps.length ? this.opts.allowIps.join(",") : "(all)"} rateLimit=${this.opts.rateLimitPerMin || "off"}/min`,
+    );
   }
 
   async stop(): Promise<void> {
+    if (this.ssePing) clearInterval(this.ssePing);
+    for (const c of this.sseClients) {
+      try {
+        c.res.end();
+      } catch {
+        // ignore
+      }
+    }
+    this.sseClients.clear();
     for (const handle of this.monitors.values()) {
       handle.controller.abort();
     }
@@ -202,6 +299,15 @@ export class BridgeServer {
       logger: this.opts.logger.withAccount(accountId),
       onInbound: async (event) => {
         handle.lastInboundAt = Date.now();
+        const session = event.raw.session_id;
+        this.broadcast({
+          type: "inbound",
+          accountId: event.accountId,
+          userId: event.userId,
+          text: event.text,
+          timestamp: event.timestamp,
+          session,
+        });
         await this.mirrorInbound(event);
       },
     })
@@ -235,26 +341,119 @@ export class BridgeServer {
     }
   }
 
-  // ── auth ─────────────────────────────────────────────────────────────────────
+  // ── auth + hardening ────────────────────────────────────────────────────────
 
   private authorized(req: http.IncomingMessage): boolean {
     if (!this.opts.apiToken) return true;
+    // Header-only — never accept a token via query string (leaks into logs).
     const header = req.headers.authorization ?? "";
-    if (header.startsWith("Bearer ") && header.slice(7).trim() === this.opts.apiToken) return true;
-    const url = new URL(req.url ?? "/", "http://localhost");
-    return url.searchParams.get("token") === this.opts.apiToken;
+    return header.startsWith("Bearer ") && header.slice(7).trim() === this.opts.apiToken;
+  }
+
+  /** Best-effort client IP, honoring X-Forwarded-For when trusted. */
+  private clientIp(req: http.IncomingMessage): string {
+    if (this.opts.trustProxy) {
+      const xff = req.headers["x-forwarded-for"];
+      if (typeof xff === "string" && xff.length > 0) return xff.split(",")[0].trim();
+    }
+    return req.socket.remoteAddress ?? "unknown";
+  }
+
+  private isLoopback(ip: string): boolean {
+    return ip === "127.0.0.1" || ip === "::1" || ip === "::ffff:127.0.0.1";
+  }
+
+  /** True if the IP passes the allowlist (empty list = allow all). */
+  private ipAllowed(ip: string): boolean {
+    if (this.opts.allowIps.length === 0) return true;
+    if (this.isLoopback(ip)) return true;
+    return this.opts.allowIps.some((rule) => ip === rule || ip.endsWith(rule) || rule === ip);
+  }
+
+  /** Token-bucket-ish per-IP limiter. Returns true if the call is allowed. */
+  private rateLimitOk(ip: string): boolean {
+    const cap = this.opts.rateLimitPerMin;
+    if (!cap || cap <= 0) return true;
+    const now = Date.now();
+    let bucket = this.rlBuckets.get(ip);
+    if (!bucket || now - bucket.start > 60_000) {
+      bucket = { start: now, count: 0 };
+      this.rlBuckets.set(ip, bucket);
+    }
+    bucket.count += 1;
+    return bucket.count <= cap;
+  }
+
+  /** Push an inbound event to every matching SSE subscriber. */
+  private broadcast(ev: InboundBroadcast): void {
+    if (this.sseClients.size === 0) return;
+    const line = `data: ${JSON.stringify(ev)}\n\n`;
+    for (const c of this.sseClients) {
+      const f = c.filter;
+      if (f.accountId && f.accountId !== ev.accountId) continue;
+      if (f.userId && f.userId !== ev.userId) continue;
+      if (f.session && f.session !== ev.session) continue;
+      try {
+        c.res.write(line);
+      } catch {
+        this.sseClients.delete(c);
+      }
+    }
   }
 
   // ── routing ──────────────────────────────────────────────────────────────────
+
+  /** GET /events — Server-Sent Events stream of inbound messages. */
+  private async handleEvents(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+    if (!this.authorized(req)) {
+      return sendJson(res, 401, { error: "unauthorized" });
+    }
+    const ip = this.clientIp(req);
+    if (!this.ipAllowed(ip)) {
+      return sendJson(res, 403, { error: "forbidden" });
+    }
+    const url = new URL(req.url ?? "/", "http://localhost");
+    const filter: SseClient["filter"] = {
+      accountId: url.searchParams.get("accountId") ?? undefined,
+      userId: url.searchParams.get("userId") ?? undefined,
+      session: url.searchParams.get("session") ?? undefined,
+    };
+    res.writeHead(200, {
+      "content-type": "text/event-stream",
+      cache: "no-cache",
+      connection: "keep-alive",
+      "x-accel-buffering": "no",
+    });
+    res.write(": connected\n\n");
+    const client: SseClient = { res, filter };
+    this.sseClients.add(client);
+    req.on("close", () => {
+      this.sseClients.delete(client);
+    });
+  }
 
   private async handle(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
     const url = new URL(req.url ?? "/", "http://localhost");
     const path = url.pathname.replace(/\/+$/, "") || "/";
     const method = req.method ?? "GET";
+    const ip = this.clientIp(req);
 
-    // Health is always public.
+    // Health is always public (load balancers / monitoring).
     if (path === "/health" && method === "GET") {
-      return sendJson(res, 200, { ok: true });
+      const accounts = listAccountIds();
+      const alive = accounts.filter((id) => this.monitors.get(id)?.running);
+      return sendJson(res, 200, {
+        ok: true,
+        accounts: accounts.length,
+        monitorsAlive: alive.length,
+        sseClients: this.sseClients.size,
+        outboxPending: accounts.reduce((n, id) => n + this.outbox.pending(id), 0),
+      });
+    }
+
+    // IP allowlist gate (everything past health).
+    if (!this.ipAllowed(ip)) {
+      return sendJson(res, 403, { error: "forbidden" });
     }
 
     if (!this.authorized(req)) {
@@ -270,14 +469,18 @@ export class BridgeServer {
     }
 
     if (path === "/send" && method === "POST") {
+      if (!this.rateLimitOk(ip)) {
+        return sendJson(res, 429, { error: "rate limit exceeded" });
+      }
       return sendJson(res, 200, await this.handleSend(await readBody(req)));
     }
 
-    if (path === "/login/start" && method === "POST") {
-      return sendJson(res, 200, await this.handleLoginStart());
-    }
-
-    if (path === "/login/wait" && method === "POST") {
+    // Login endpoints can be shuttered for public deployments.
+    if ((path === "/login/start" || path === "/login/wait") && method === "POST") {
+      if (this.opts.disableLogin) {
+        return sendJson(res, 404, { error: "login endpoints disabled (WECLAW_DISABLE_LOGIN=1)" });
+      }
+      if (path === "/login/start") return sendJson(res, 200, await this.handleLoginStart());
       return sendJson(res, 200, await this.handleLoginWait(await readBody(req)));
     }
 
@@ -292,7 +495,8 @@ export class BridgeServer {
       return {
         accountId: id,
         configured: Boolean(data?.token),
-        userId,
+        // mask the recipient id — /status is meant for liveness, not contact export
+        userId: userId ? maskId(userId) : undefined,
         monitorRunning: mon?.running ?? false,
         lastInboundAt: mon?.lastInboundAt ?? null,
         contextTokenAgeSec: userId ? contextTokenAgeSec(id, userId) : undefined,
