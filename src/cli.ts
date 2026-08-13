@@ -16,6 +16,7 @@ import process from "node:process";
 import { IlinkClient } from "./ilink/client.js";
 import { runInteractiveLogin } from "./auth/login.js";
 import { BridgeServer } from "./bridge/server.js";
+import { RelayServer } from "./bridge/relay.js";
 import { sendText } from "./bridge/send.js";
 import {
   clearAccount,
@@ -80,6 +81,12 @@ weclaw — standalone WeChat ClawBot bridge (no openclaw required)
     --allow-ips IP,IP      非健康检查端点的 IP 白名单 (逗号分隔)
     --trust-proxy true     信任 X-Forwarded-For (反代后必填)
     --rate-limit N         每个 IP 每分钟 /send 上限 (0=不限)
+
+  weclaw relay   本地中继：claude 在本地、桥接在服务器时使用
+    --remote URL           服务器桥接地址 (必填，或 WECLAW_REMOTE_URL)
+    --api-token T          服务器桥接的 Bearer token
+    --port N               本地监听端口 (默认 4789，让 skill/hooks 零改动)
+    --host H               本地监听地址 (默认 127.0.0.1)
 
   weclaw send    单次把一段文字转发给微信用户
     --text "..."           要发送的内容 (必填)
@@ -156,6 +163,27 @@ async function cmdStart(flags: Record<string, string>): Promise<void> {
   await server.start();
 }
 
+async function cmdRelay(flags: Record<string, string>): Promise<void> {
+  const remote = flags.remote ?? process.env.WECLAW_REMOTE_URL;
+  assert(typeof remote === "string" && remote.length > 0, "--remote <url> 必填（或设 WECLAW_REMOTE_URL），指向服务器上的桥接");
+  const log = new Logger();
+  const relay = new RelayServer({
+    remoteUrl: remote,
+    token: flags["api-token"] ?? process.env.WECLAW_API_TOKEN,
+    port: flags.port ? Number(flags.port) : undefined,
+    host: flags.host,
+    logger: log,
+  });
+  const shutdown = async (signal: string) => {
+    log.info(`received ${signal}, shutting down…`);
+    await relay.stop();
+    process.exit(0);
+  };
+  process.on("SIGINT", () => void shutdown("SIGINT"));
+  process.on("SIGTERM", () => void shutdown("SIGTERM"));
+  await relay.start();
+}
+
 async function cmdSend(flags: Record<string, string>): Promise<void> {
   const text = flags.text;
   assert(typeof text === "string" && text.length > 0, "--text 为必填项");
@@ -216,6 +244,8 @@ function cmdService(positional: string[], flags: Record<string, string>): void {
     host: flags.host,
     apiToken: flags["api-token"] ?? process.env.WECLAW_API_TOKEN,
     inboundWebhook: flags["inbound-webhook"] ?? process.env.WECLAW_INBOUND_WEBHOOK,
+    relay: flags.relay === "true",
+    remoteUrl: flags.remote ?? process.env.WECLAW_REMOTE_URL,
   };
   switch (sub) {
     case "install":
@@ -240,6 +270,8 @@ async function main(): Promise<void> {
       return await cmdLogin(flags);
     case "start":
       return await cmdStart(flags);
+    case "relay":
+      return await cmdRelay(flags);
     case "send":
       return await cmdSend(flags);
     case "status":
