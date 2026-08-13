@@ -36,6 +36,7 @@ import { deployRemote } from "./service/deploy.js";
 import { runHook } from "./hooks/hook.js";
 import { installHooks, uninstallHooks } from "./hooks/install.js";
 import { listSessions } from "./store/sessions.js";
+import { searchArchive } from "./store/archive.js";
 
 interface ParsedArgs {
   command: string;
@@ -307,6 +308,21 @@ function cmdSessions(): void {
   }
 }
 
+function cmdSearch(flags: Record<string, string>): void {
+  const q = flags.query ?? "";
+  assert(typeof q === "string" && q.length > 0, "--query <关键词> 必填");
+  const results = searchArchive(q, flags.limit ? Number(flags.limit) : undefined);
+  if (results.length === 0) {
+    process.stdout.write("（无匹配记录）\n");
+    return;
+  }
+  for (const r of results) {
+    const dir = r.dir === "in" ? "←" : "→";
+    const time = new Date(r.ts).toISOString();
+    process.stdout.write(`${time} ${dir} [${r.accountId}] ${r.text.slice(0, 120)}${r.text.length > 120 ? "…" : ""}\n`);
+  }
+}
+
 function cmdLogout(flags: Record<string, string>): void {
   const ids = listAccountIds();
   if (ids.length === 0) {
@@ -369,6 +385,8 @@ async function main(): Promise<void> {
       return cmdAccounts();
     case "sessions":
       return cmdSessions();
+    case "search":
+      return cmdSearch(flags);
     case "logout":
       return cmdLogout(flags);
     case "service":

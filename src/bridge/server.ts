@@ -23,6 +23,9 @@ import { sendText, SendError } from "./send.js";
 import { runMonitor } from "./monitor.js";
 import { Outbox } from "./outbox.js";
 import { redact } from "../util/redact.js";
+import { chunkText } from "../util/text.js";
+import { routeInbound, parseAllowList } from "./inbox.js";
+import { archive } from "../store/archive.js";
 import {
   getContextToken,
   listAccountIds,
@@ -147,6 +150,7 @@ export class BridgeServer {
     allowIps: string[];
     trustProxy: boolean;
     rateLimitPerMin: number;
+    inboxAllow: string[];
     logger: Logger;
   };
   private server?: http.Server;
@@ -174,6 +178,7 @@ export class BridgeServer {
       allowIps,
       trustProxy: opts.trustProxy ?? process.env.WECLAW_TRUST_PROXY === "1",
       rateLimitPerMin: opts.rateLimitPerMin ?? (Number(process.env.WECLAW_RATE_LIMIT) || 0),
+      inboxAllow: parseAllowList(process.env.WECLAW_INBOX_ALLOW),
       logger: opts.logger ?? new Logger(),
     };
     const self = this;
@@ -299,6 +304,26 @@ export class BridgeServer {
       logger: this.opts.logger.withAccount(accountId),
       onInbound: async (event) => {
         handle.lastInboundAt = Date.now();
+        archive({ dir: "in", accountId: event.accountId, userId: event.userId, text: event.text });
+        // Command router: /help /status etc. reply directly in WeChat.
+        const route = routeInbound(event, {
+          allow: this.opts.inboxAllow,
+          monitorInfo: (aid) => {
+            const m = this.monitors.get(aid);
+            return { running: m?.running ?? false, lastInboundAt: m?.lastInboundAt ?? null, outboxPending: this.outbox.pending(aid) };
+          },
+        });
+        if (route.handled) {
+          if (route.reason) this.opts.logger.info(`inbox: ${route.reason}`);
+          if (route.reply) {
+            try {
+              await sendText(client, { to: event.userId, text: route.reply, contextToken: event.contextToken });
+            } catch (err) {
+              this.opts.logger.warn(`inbox reply failed: ${String(err)}`);
+            }
+          }
+          return; // commands are not mirrored to the external webhook
+        }
         const session = event.raw.session_id;
         this.broadcast({
           type: "inbound",
@@ -544,14 +569,22 @@ export class BridgeServer {
     });
     const contextToken = getContextToken(account.accountId, to);
     const safeText = redaction.text;
+    const chunks = chunkText(safeText);
     try {
-      const { messageId } = await sendText(client, { to, text: safeText, contextToken });
-      return { ok: true, account: account.accountId, to, messageId };
+      let lastMessageId = "";
+      for (let i = 0; i < chunks.length; i++) {
+        const part = chunks.length > 1 ? `${chunks[i]}\n(${i + 1}/${chunks.length})` : chunks[i];
+        const r = await sendText(client, { to, text: part, contextToken });
+        lastMessageId = r.messageId;
+      }
+      archive({ dir: "out", accountId: account.accountId, userId: to, text: safeText, status: "delivered" });
+      return { ok: true, account: account.accountId, to, messageId: lastMessageId, parts: chunks.length };
     } catch (err) {
       if (err instanceof SendError && (err.kind === "prepare_failed" || err.kind === "stale_token")) {
         // Missing / expired session: park the message and wait for a fresh capture.
         markContextTokenStale(account.accountId, to, true);
         const id = this.outbox.enqueue(account.accountId, { to, text: safeText, contextToken }, err.kind);
+        archive({ dir: "out", accountId: account.accountId, userId: to, text: safeText, status: "queued" });
         const hint =
           err.kind === "stale_token"
             ? "bot token 失效，请运行 `weclaw login` 重新绑定后再发"
@@ -565,6 +598,7 @@ export class BridgeServer {
           hint,
         };
       }
+      archive({ dir: "out", accountId: account.accountId, userId: to, text: safeText, status: "failed" });
       throw new HttpError(502, `send failed: ${String(err instanceof Error ? err.message : err)}`);
     }
   }
