@@ -13,12 +13,23 @@
 
 import http from "node:http";
 
-import { touchSession, sessionTag, listSessions, setActiveSession, getActiveSession } from "../store/sessions.js";
+import {
+  touchSession,
+  sessionTag,
+  listSessions,
+  setActiveSession,
+  getActiveSession,
+  probeAndPruneSessions,
+  forgetSession,
+  clearAllSessions,
+} from "../store/sessions.js";
+import { hostPatch, type HostFields, type Liveness } from "../store/liveness.js";
 import { routeAndAppend, consumePending } from "../store/pending.js";
 import { loadHooksConfig, defaultHooksConfig } from "../hooks/config.js";
 import { readConfigHtml, saveHooksFromJsonBody } from "./configPage.js";
 import { Logger } from "../util/log.js";
 import { sleep } from "../util/id.js";
+import { getVersion } from "../util/version.js";
 
 export interface RelayOptions {
   /** Upstream bridge URL, e.g. https://bridge.example.com */
@@ -44,6 +55,21 @@ interface InboundEvent {
   text: string;
   timestamp?: number;
   session?: string;
+}
+
+/** /send body — everything the hook may push upstream. */
+interface SendBody extends HostFields {
+  text?: string;
+  to?: string;
+  account?: string;
+  session?: string;
+}
+
+/** /routes registration body. */
+interface RoutesBody extends HostFields {
+  session?: string;
+  userId?: string;
+  accountId?: string;
 }
 
 export class RelayServer {
@@ -94,7 +120,7 @@ export class RelayServer {
     const method = req.method ?? "GET";
 
     if (p === "/health" && method === "GET") {
-      return this.sendJson(res, 200, { ok: true, relay: true, upstream: this.remoteUrl });
+      return this.sendJson(res, 200, { ok: true, relay: true, version: getVersion(), upstream: this.remoteUrl });
     }
 
     // Config UI + data MUST be served from the LOCAL hooks.json. In relay mode
@@ -108,7 +134,8 @@ export class RelayServer {
     }
     if (p === "/config" && method === "GET") {
       const cfg = loadHooksConfig() ?? defaultHooksConfig();
-      return this.sendJson(res, 200, cfg);
+      // `mode` tells the config page which machine's hooks.json it edits.
+      return this.sendJson(res, 200, { ...cfg, mode: "relay" });
     }
     if (p === "/config" && method === "POST") {
       const r = saveHooksFromJsonBody(await readBody(req));
@@ -130,16 +157,16 @@ export class RelayServer {
     }
 
     if (p === "/routes" && method === "POST") {
-      // SessionStart registration: { session, accountId?, userId? }
+      // SessionStart registration: { session, accountId?, userId?, pid?… }
       const body = await readBody(req);
-      let parsed: { session?: string; userId?: string; accountId?: string } = {};
+      let parsed: RoutesBody = {};
       try {
         parsed = JSON.parse(body);
       } catch {
         return this.sendJson(res, 400, { error: "invalid JSON body" });
       }
       if (!parsed.session) return this.sendJson(res, 400, { error: "session required" });
-      const entry = touchSession(parsed.session, { userId: parsed.userId, accountId: parsed.accountId });
+      const entry = touchSession(parsed.session, hostPatch(parsed));
       return this.sendJson(res, 200, { ok: true, label: entry.label });
     }
 
@@ -152,7 +179,7 @@ export class RelayServer {
 
   private async handleSend(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
     const body = await readBody(req);
-    let parsed: { text?: string; to?: string; account?: string; session?: string } = {};
+    let parsed: SendBody = {};
     try {
       parsed = JSON.parse(body);
     } catch {
@@ -165,6 +192,7 @@ export class RelayServer {
       const entry = touchSession(parsed.session, {
         userId: parsed.to,
         accountId: parsed.account,
+        ...hostPatch(parsed),
       });
       const tag = sessionTag(entry, this.tag);
       if (tag && typeof parsed.text === "string") {
@@ -315,11 +343,27 @@ export class RelayServer {
     const [cmd, ...rest] = ev.text.trim().split(/\s+/);
     switch (cmd.toLowerCase()) {
       case "/help":
-        return ["可用指令：", "/help     显示本帮助", "/status   账号+监听+token+队列", "/accounts 绑定账号", "/switch   列出/切换会话", "/ping     存活检测"].join("\n");
+        return [
+          "可用指令：",
+          "/help     显示本帮助",
+          "/status   账号+监听+token+队列",
+          "/accounts 绑定账号",
+          "/switch   列出/切换会话（自动清理已退出）",
+          "/clear <序号|all> 移除会话记录",
+          "/version  电脑端 + 服务器端版本",
+          "/ping     存活检测",
+        ].join("\n");
       case "/ping":
         return "pong";
+      case "/version":
+        return await this.proxyJson("/health", (data) => {
+          const server = typeof data.version === "string" ? data.version : "未知（服务器需更新到 ≥0.2.10）";
+          return `电脑端（relay/hook）: ${getVersion()}\n服务器端（bridge）: ${server}`;
+        });
       case "/switch":
         return this.cmdSwitch(ev, rest);
+      case "/clear":
+        return this.cmdClear(rest);
       case "/status":
         return await this.proxyJson("/status", (data) => {
           const accts = (data.accounts as Record<string, unknown>[] | undefined) ?? [];
@@ -337,24 +381,51 @@ export class RelayServer {
     }
   }
 
-  /** /switch operates on LOCAL sessions (relay is the state source). */
+  /** /switch operates on LOCAL sessions (relay is the state source).
+   *  Listing probes every session's host process and auto-prunes dead ones —
+   *  the orphan-session cleanup SessionEnd can't do when a process is killed. */
   private cmdSwitch(ev: InboundEvent, rest: string[]): string {
-    const sessions = listSessions();
-    if (sessions.length === 0) return "暂无已注册的 claude/codex 会话。";
     const arg = rest.join(" ").trim();
     const src = (sid: string) => (sid.startsWith("codex") ? "codex" : "claude");
+    const mark = (v: Liveness | undefined) => (v === "alive" ? " ✅" : " ❔");
+    const note: string[] = [];
+
     if (!arg) {
+      const { remaining, status, pruned } = probeAndPruneSessions();
+      if (pruned.length > 0) note.push(`已自动清理 ${pruned.length} 个已退出的会话`);
+      if (remaining.length === 0) {
+        return note.length ? `暂无存活会话（${note[0]}）。` : "暂无已注册的 claude/codex 会话。";
+      }
       const active = getActiveSession(ev.userId);
-      const lines = sessions.map((s, i) =>
-        `${i + 1}. ${s.label}  (${src(s.sessionId)})${s.sessionId === active ? " ← 当前" : ""}`);
-      return `会话列表：\n${lines.join("\n")}\n/switch <序号> 切换`;
+      const lines = remaining.map((s, i) =>
+        `${i + 1}. ${s.label}  (${src(s.sessionId)})${mark(status.get(s.sessionId))}${s.sessionId === active ? " ← 当前" : ""}`);
+      note.push("❔ = 升级前的旧记录，可 /clear all 一并清掉");
+      return `会话列表：\n${lines.join("\n")}\n${note.join("；")}\n/switch <序号> 切换`;
     }
+
+    // Selection: re-probe so numbering matches the last listed (pruned) list.
+    const { remaining, status } = probeAndPruneSessions();
     let target: { sessionId: string; label: string } | undefined;
-    if (/^\d+$/.test(arg)) target = sessions[Number(arg) - 1];
-    else target = sessions.find((s) => s.sessionId.startsWith(arg));
+    if (/^\d+$/.test(arg)) target = remaining[Number(arg) - 1];
+    else target = remaining.find((s) => s.sessionId.startsWith(arg));
     if (!target) return `没找到「${arg}」。/switch 看列表。`;
+    if (status.get(target.sessionId) === "dead") return `${target.label} 的进程已退出，无法切换。`;
     setActiveSession(ev.userId, target.sessionId);
     return `已切换到 ${target.label} (${src(target.sessionId)})。\n后续回复将优先路由给它。`;
+  }
+
+  /** /clear <序号|all> — manual removal (legacy unknown entries etc.). */
+  private cmdClear(rest: string[]): string {
+    const arg = rest[0]?.trim();
+    if (arg === "all") {
+      const n = clearAllSessions();
+      return n > 0 ? `已清空全部 ${n} 条会话记录（新会话会自动重新登记）。` : "本来就没有会话记录。";
+    }
+    if (!arg || !/^\d+$/.test(arg)) return "用法：/clear <序号> 或 /clear all（先 /switch 看序号）";
+    const target = listSessions()[Number(arg) - 1];
+    if (!target) return `无序号 ${arg}`;
+    forgetSession(target.sessionId);
+    return `已移除 ${target.label}`;
   }
 
   /** Proxy a GET to the upstream and format the JSON via `fmt`. */

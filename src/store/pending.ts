@@ -14,7 +14,8 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { resolveStateDir } from "./account.js";
-import { sessionsForUser, getActiveSession } from "./sessions.js";
+import { sessionsForUser, getActiveSession, getSession } from "./sessions.js";
+import { pidAlive } from "./liveness.js";
 
 export interface PendingMsg {
   text: string;
@@ -69,10 +70,15 @@ export function routeAndAppend(
   userId: string,
   msg: PendingMsg,
 ): string[] {
+  // Honor the active session — unless its host process is confirmed gone
+  // (an orphan the /switch prune hasn't caught yet); then fall through to
+  // normal matching so the reply doesn't vanish into a dead pending file.
   const active = getActiveSession(userId);
+  const activeEntry = active ? getSession(active) : undefined;
+  const activeUsable = active && (!activeEntry?.pid || pidAlive(activeEntry.pid));
   let targets: string[];
-  if (active) {
-    targets = [active];
+  if (activeUsable) {
+    targets = [active!];
   } else {
     const matched = sessionsForUser(accountId, userId);
     targets = [];

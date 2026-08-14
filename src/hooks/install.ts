@@ -16,7 +16,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { saveHooksConfig, defaultHooksConfig, type HooksConfig } from "./config.js";
+import { loadHooksConfig, saveHooksConfig, defaultHooksConfig, type HooksConfig } from "./config.js";
 import { Logger } from "../util/log.js";
 
 export interface InstallHooksOptions {
@@ -90,14 +90,19 @@ function buildHooksConfig(opts: InstallHooksOptions): Record<string, MatcherGrou
 
 export function installHooks(opts: InstallHooksOptions): { file: string } {
   const log = opts.logger ?? new Logger();
+  // Merge onto the EXISTING hooks.json — a re-install must not clobber
+  // settings the user tuned via the config page (quiet hours, filters, …).
+  // Explicit CLI flags win; absent flags leave the saved value untouched.
+  const existing = loadHooksConfig();
   const cfg: HooksConfig = {
     ...defaultHooksConfig(),
-    target: opts.target ?? defaultHooksConfig().target,
-    token: opts.token,
-    notifyStop: opts.notifyStop ?? false,
-    notifyNotification: opts.notifyNotification ?? true,
-    highRiskTools: opts.highRiskTools ?? [],
-    asyncRewake: opts.asyncRewake ?? true,
+    ...existing,
+    target: opts.target ?? existing?.target ?? defaultHooksConfig().target,
+    token: opts.token ?? existing?.token,
+    notifyStop: opts.notifyStop ?? existing?.notifyStop ?? false,
+    notifyNotification: opts.notifyNotification ?? existing?.notifyNotification ?? true,
+    highRiskTools: opts.highRiskTools ?? existing?.highRiskTools ?? [],
+    asyncRewake: opts.asyncRewake ?? existing?.asyncRewake ?? true,
   };
   saveHooksConfig(cfg);
 

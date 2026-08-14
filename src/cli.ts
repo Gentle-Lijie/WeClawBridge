@@ -38,6 +38,7 @@ import { runHook } from "./hooks/hook.js";
 import { runCodexHook, installCodexHooks, uninstallCodexHooks } from "./hooks/codex.js";
 import { installHooks, uninstallHooks } from "./hooks/install.js";
 import { listSessions } from "./store/sessions.js";
+import { probeHosts } from "./store/liveness.js";
 import { searchArchive } from "./store/archive.js";
 
 interface ParsedArgs {
@@ -199,14 +200,19 @@ function cmdHooks(positional: string[], flags: Record<string, string>): void {
   const log = new Logger();
   switch (sub) {
     case "install": {
+      // Absent flags pass undefined so installHooks keeps the saved hooks.json
+      // value instead of resetting it to the default.
       installHooks({
         global: flags.local !== "true", // default global; --local true → project
         target: flags.target ?? process.env.WECLAW_HOOK_TARGET,
         token: flags.token ?? flags["api-token"] ?? process.env.WECLAW_API_TOKEN,
-        notifyStop: flags["notify-stop"] === "true",
-        notifyNotification: flags["notify-notification"] !== "false",
-        highRiskTools: flags["high-risk"] ? flags["high-risk"].split(",").map((s) => s.trim()).filter(Boolean) : [],
-        asyncRewake: flags["async-rewake"] !== "false",
+        notifyStop: flags["notify-stop"] === undefined ? undefined : flags["notify-stop"] === "true",
+        notifyNotification:
+          flags["notify-notification"] === undefined ? undefined : flags["notify-notification"] !== "false",
+        highRiskTools: flags["high-risk"]
+          ? flags["high-risk"].split(",").map((s) => s.trim()).filter(Boolean)
+          : undefined,
+        asyncRewake: flags["async-rewake"] === undefined ? undefined : flags["async-rewake"] !== "false",
         logger: log,
       });
       // Optionally also wire Codex CLI's notify hook in the same install.
@@ -343,12 +349,15 @@ function cmdSessions(): void {
     process.stdout.write("暂无已注册的 claude 会话（会话在首次 /send 或 SessionStart hook 后自动登记）。\n");
     return;
   }
-  for (const s of sessions) {
+  const verdicts = probeHosts(sessions.map((s) => ({ pid: s.pid ?? 0, startedAt: s.hostStartedAt })));
+  sessions.forEach((s, i) => {
     const age = Math.round((Date.now() - s.lastActive) / 1000);
+    const alive = s.pid ? verdicts[i] : "unknown";
+    const mark = alive === "alive" ? "✅" : alive === "dead" ? "❌" : "❔";
     process.stdout.write(
-      `• [${s.label}] ${s.sessionId}\n    user: ${s.userId ?? "(未绑定)"}  account: ${s.accountId ?? "?"}  活跃: ${age}s 前\n`,
+      `${mark} [${s.label}] ${s.sessionId}\n    user: ${s.userId ?? "(未绑定)"}  account: ${s.accountId ?? "?"}  host: ${s.host ?? "?"}@${s.pid ?? "?"}  活跃: ${age}s 前\n`,
     );
-  }
+  });
 }
 
 function cmdSearch(flags: Record<string, string>): void {

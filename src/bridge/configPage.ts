@@ -54,6 +54,8 @@ export function saveHooksFromJsonBody(bodyText: string): ConfigSaveResult {
   } catch {
     return { ok: false, status: 400, error: "invalid JSON body" };
   }
+  // `mode` is a GET-response hint (which server served this page), not config.
+  delete body.mode;
   // Merge onto the EXISTING config so partial saves don't reset other fields.
   const existing = loadHooksConfig() ?? defaultHooksConfig();
   const cfg = { ...existing, ...body } as HooksConfig;

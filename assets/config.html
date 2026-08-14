@@ -55,11 +55,26 @@
   .ok { color: #386b5b; }
   .err { color: #b23a2c; }
   .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  #modeBanner {
+    display: none; border-radius: 8px; padding: 10px 14px; margin-bottom: 16px;
+    font-size: 13.5px; line-height: 1.6;
+  }
+  #modeBanner.relay {
+    display: block; background: #e5efe5; border: 1px solid #b7d2b7; color: #2f5e3e;
+  }
+  #modeBanner.bridge {
+    display: block; background: #f6e9d8; border: 1px solid #e0c294; color: #7a4a12;
+  }
+  @media (prefers-color-scheme: dark) {
+    #modeBanner.relay { background: #1d2a20; border-color: #33503a; color: #9fd0ac; }
+    #modeBanner.bridge { background: #2d2416; border-color: #5c4a28; color: #e5c084; }
+  }
 </style>
 </head>
 <body>
 <div class="wrap">
   <h1>WeClawBridge · 推送规则</h1>
+  <div id="modeBanner" class="relay"></div>
   <div class="hint">配置哪些情况触发推送、哪些抑制。保存后立即生效（写入 <code>hooks.json</code>，<code>weclaw hook</code> 每次读取）。</div>
 
   <div class="card">
@@ -127,6 +142,15 @@ function lines(v){ return (v||"").split("\n").map(s=>s.trim()).filter(Boolean); 
 function csv(v){ return (v||"").split(",").map(s=>s.trim()).filter(Boolean); }
 
 function fill(cfg){
+  const b = $("modeBanner");
+  if (cfg.mode === "relay") {
+    b.className = "relay";
+    b.textContent = "🟢 你正在【本地 relay】的配置页 — 修改写入的是本机 hooks.json，本机 claude/codex 的 hook 直接读取，保存后立即生效。";
+  } else {
+    b.className = "bridge";
+    b.textContent = "⚠️ 你正在【桥接服务器】的配置页 — 修改只写入这台服务器上的 hooks.json。" +
+      "只有当 claude/codex 也运行在这台服务器上时才生效；若你的 claude 在本地电脑（relay 模式），请在本机打开 http://127.0.0.1:4789 修改配置。";
+  }
   $("target").value = cfg.target || "";
   $("token").value = cfg.token || "";
   $("notifyStop").checked = !!cfg.notifyStop;

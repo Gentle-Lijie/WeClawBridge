@@ -20,6 +20,7 @@ import fs from "node:fs";
 import { loadHooksConfig, pushDecision } from "./config.js";
 import { consumePending } from "../store/pending.js";
 import { setSessionLabel, forgetSession } from "../store/sessions.js";
+import { findHostProcess, type HostProcess } from "../store/liveness.js";
 import { sleep } from "../util/id.js";
 
 /**
@@ -77,9 +78,25 @@ function readStdin(): Promise<string> {
   });
 }
 
+/** Host process info for this hook (computed once, cached for the run). */
+let hostCache: HostProcess | null | undefined;
+function hostInfo(): HostProcess | null {
+  if (hostCache === undefined) hostCache = findHostProcess();
+  return hostCache;
+}
+
+/** Liveness anchor fields the relay stores alongside the session. */
+function hostFields(): Record<string, unknown> {
+  const h = hostInfo();
+  return h ? { pid: h.pid, hostStartedAt: h.startedAt, host: h.comm } : {};
+}
+
 async function pushToWeChat(target: string, token: string | undefined, text: string, session?: string): Promise<void> {
   const body: Record<string, unknown> = { text };
-  if (session) body.session = session;
+  if (session) {
+    body.session = session;
+    Object.assign(body, hostFields());
+  }
   const headers: Record<string, string> = { "content-type": "application/json" };
   if (token) headers.authorization = `Bearer ${token}`;
   try {
@@ -144,7 +161,7 @@ export async function runHook(): Promise<void> {
       await fetch(new URL("/routes", cfg.target + "/").toString(), {
         method: "POST",
         headers: { "content-type": "application/json", ...(cfg.token ? { authorization: `Bearer ${cfg.token}` } : {}) },
-        body: JSON.stringify({ session: sid, registeredAt: Date.now() }),
+        body: JSON.stringify({ session: sid, registeredAt: Date.now(), ...hostFields() }),
       }).catch(() => {});
     } catch {
       // non-fatal

@@ -29,6 +29,7 @@ import { archive } from "../store/archive.js";
 import { loadHooksConfig, defaultHooksConfig } from "../hooks/config.js";
 import { readConfigHtml, saveHooksFromJsonBody } from "./configPage.js";
 import { touchSession } from "../store/sessions.js";
+import { hostPatch, type HostFields } from "../store/liveness.js";
 import { routeAndAppend } from "../store/pending.js";
 import {
   getContextToken,
@@ -39,6 +40,7 @@ import {
   contextTokenAgeSec,
 } from "../store/account.js";
 import { Logger } from "../util/log.js";
+import { getVersion } from "../util/version.js";
 
 export interface ServerOptions {
   port?: number;
@@ -496,6 +498,7 @@ export class BridgeServer {
       const alive = accounts.filter((id) => this.monitors.get(id)?.running);
       return sendJson(res, 200, {
         ok: true,
+        version: getVersion(),
         accounts: accounts.length,
         monitorsAlive: alive.length,
         sseClients: this.sseClients.size,
@@ -529,7 +532,8 @@ export class BridgeServer {
 
     if (path === "/config" && method === "GET") {
       const cfg = loadHooksConfig() ?? defaultHooksConfig();
-      return sendJson(res, 200, cfg);
+      // `mode` tells the config page which machine's hooks.json it edits.
+      return sendJson(res, 200, { ...cfg, mode: "bridge" });
     }
 
     if (path === "/config" && method === "POST") {
@@ -540,8 +544,8 @@ export class BridgeServer {
     }
 
     if (path === "/routes" && method === "POST") {
-      // SessionStart registration: { session, userId?, accountId? }
-      let body: { session?: string; userId?: string; accountId?: string };
+      // SessionStart registration: { session, userId?, accountId?, pid?… }
+      let body: { session?: string; userId?: string; accountId?: string; pid?: number; hostStartedAt?: string; host?: string };
       try {
         body = JSON.parse(await readBody(req));
       } catch {
@@ -553,7 +557,7 @@ export class BridgeServer {
       if (this.opts.inboxDisable) {
         return sendJson(res, 200, { ok: true, relay: true, note: "inbox disabled — session not stored" });
       }
-      const entry = touchSession(body.session, { userId: body.userId, accountId: body.accountId });
+      const entry = touchSession(body.session, hostPatch(body));
       return sendJson(res, 200, { ok: true, label: entry.label });
     }
 
@@ -596,7 +600,7 @@ export class BridgeServer {
   }
 
   private async handleSend(bodyText: string): Promise<unknown> {
-    let body: { text?: string; to?: string; account?: string; session?: string };
+    let body: HostFields & { text?: string; to?: string; account?: string; session?: string };
     try {
       body = JSON.parse(bodyText);
     } catch {
@@ -636,7 +640,7 @@ export class BridgeServer {
     }
     // Learn the claude session ↔ WeChat user binding so inbound replies route back.
     if (typeof body.session === "string" && body.session) {
-      touchSession(body.session, { userId: to, accountId: account.accountId });
+      touchSession(body.session, { userId: to, accountId: account.accountId, ...hostPatch(body) });
     }
     const client = new IlinkClient({
       baseUrl: account.baseUrl,

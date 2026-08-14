@@ -17,6 +17,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { loadHooksConfig, pushDecision, type HooksConfig } from "./config.js";
+import { findHostProcess } from "../store/liveness.js";
 
 interface CodexPayload {
   type?: string;
@@ -41,7 +42,16 @@ async function maybePush(text: string, cfg: HooksConfig, session?: string): Prom
     return;
   }
   const body: Record<string, unknown> = { text };
-  if (session) body.session = session;
+  if (session) {
+    body.session = session;
+    // Liveness anchor: let the relay tie this session to the codex process.
+    const host = findHostProcess();
+    if (host) {
+      body.pid = host.pid;
+      body.hostStartedAt = host.startedAt;
+      body.host = host.comm;
+    }
+  }
   const headers: Record<string, string> = { "content-type": "application/json" };
   if (cfg.token) headers.authorization = `Bearer ${cfg.token}`;
   try {

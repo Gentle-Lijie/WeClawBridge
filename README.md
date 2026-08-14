@@ -28,7 +28,7 @@ WeClawBridge 重新实现了 `@tencent-weixin/openclaw-weixin` 插件所用的 i
 - ✅ **Claude Code Hooks**：`weclaw hooks install` 一键注册 Stop / Notification / 高危工具事件，自动推送到微信
 - ✅ **本地 relay / 一键远程部署**：claude 在本地、桥接在服务器时，`weclaw relay` 做双向中继；`weclaw deploy --ssh` 一键把桥接部署到你自己的服务器（装运行时、迁凭证、nginx 反代、systemd）
 - ✅ **推送规则配置面板**：浏览器打开 `weclaw config`，可视化配置事件开关 / 高危工具 / 关键词过滤 / 免打扰时段
-- ✅ **入站指令**：在微信里给 bot 发 `/help` `/status` `/accounts` `/ping` `/switch`，直接收到回复
+- ✅ **入站指令**：在微信里给 bot 发 `/help` `/status` `/accounts` `/ping` `/switch` `/clear` `/version`，直接收到回复
 - ✅ **自愈与安全**：`context_token` 失效自动入队重发、出站密钥脱敏、IP 白名单、速率限制、消息归档检索
 - ✅ **开机自启**：`weclaw service install` 自动生成 systemd / launchd / 计划任务
 - ✅ **Claude Code Skill**：自带一个自愈型 skill `/weclaw-bridge`
@@ -327,7 +327,7 @@ claude
 # → claude 在终端被唤醒，把你的回复当作指令继续执行
 ```
 
-**多会话**：每个 claude 会话首次 `/send` 时自动登记（绑定到你的微信）。`/switch` 在微信里列出/切换当前活跃会话；非命令回复会路由到当前活跃会话的 pending 队列。
+**多会话**：每个 claude 会话首次 `/send` 时自动登记（绑定到你的微信），并记录其宿主进程（pid + 启动指纹）。`/switch` 在微信里列出/切换当前活跃会话，**列出时会探测每个会话的进程存活**——已退出的自动清理（含被 kill / 崩溃而没触发 SessionEnd 的孤儿），升级前的旧记录标 ❔ 可用 `/clear all` 一次清空；非命令回复会路由到当前活跃会话的 pending 队列（活跃会话进程已死时自动回落到普通匹配）。`/version` 显示电脑端与服务器端版本号。
 
 > 注：`asyncRewake` 在 `claude -p`（headless）模式下会在结束时被回收；**双向回复注入需用交互式 `claude` 会话**。
 
