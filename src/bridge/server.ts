@@ -328,7 +328,11 @@ export class BridgeServer {
           session,
         });
         if (this.opts.inboxDisable) {
-          return; // relay mode: no command handling, no local pending
+          // Relay mode: no command handling, no local pending — but answer bare
+          // diagnostics when NO relay is subscribed, else WeChat gets total
+          // silence and "server dead" is indistinguishable from "relay down".
+          await this.relayDownDiagnostics(event, client);
+          return;
         }
         // Local-direct mode: command router replies in WeChat directly.
         const route = routeInbound(event, {
@@ -364,6 +368,50 @@ export class BridgeServer {
       .finally(() => {
         handle.running = false;
       });
+  }
+
+  /**
+   * Relay mode: commands are the local relay's job. But with zero SSE
+   * subscribers the relay is down and WeChat would get total silence; answer
+   * bare diagnostics so the user can tell "server alive, relay down" from
+   * "server dead". Silent whenever a relay IS subscribed (it replies).
+   */
+  private async relayDownDiagnostics(
+    event: { userId: string; text: string; contextToken?: string },
+    client: IlinkClient,
+  ): Promise<void> {
+    if (this.sseClients.size > 0) return; // relay connected → it replies
+    const text = event.text.trim();
+    if (!text.startsWith("/")) return; // non-command → nothing we can do
+    if (this.opts.inboxAllow.length > 0 && !this.opts.inboxAllow.includes(event.userId)) return;
+    const suffix = "（服务器直连：bridge 存活，本地 relay 未连接）";
+    const [cmd] = text.split(/\s+/);
+    let reply: string | undefined;
+    switch (cmd.toLowerCase()) {
+      case "/ping":
+        reply = `pong ${suffix}`;
+        break;
+      case "/version":
+        reply = `服务器端（bridge）: ${getVersion()} ${suffix}`;
+        break;
+      case "/status": {
+        const accounts = listAccountIds().map((id) => {
+          const mon = this.monitors.get(id);
+          return `• ${id} monitor: ${mon?.running ? "alive" : "down"}`;
+        });
+        reply = `${accounts.join("\n") || "（无账号）"}\n${suffix}`;
+        break;
+      }
+      case "/help":
+        reply = "本地 relay 未连接，仅服务器端指令可用：/ping /version /status";
+        break;
+    }
+    if (!reply) return;
+    try {
+      await sendText(client, { to: event.userId, text: reply, contextToken: event.contextToken });
+    } catch (err) {
+      this.opts.logger.warn(`relay-down diagnostics reply failed: ${String(err)}`);
+    }
   }
 
   private async mirrorInbound(event: {

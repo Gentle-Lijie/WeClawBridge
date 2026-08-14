@@ -194,6 +194,7 @@ weclaw service uninstall                               # 卸载
 | `WECLAW_RATE_LIMIT` | — | 每个 IP 每分钟 `/send` 上限 |
 | `WECLAW_NO_REDACT` | — | `=1` 关闭出站密钥脱敏 |
 | `WECLAW_INBOX_ALLOW` | — | 入站 `/` 指令的白名单 userId（逗号分隔，空=不限） |
+| `WECLAW_INBOX_DISABLE` | `=1` | 服务器纯转发模式（配合本地 relay）。**本地 relay 未连接时**，服务器仍会兜底应答 `/ping` `/version` `/status`，用于区分「服务器挂了」和「只是本地 relay 没开」 |
 | `WECLAW_REMOTE_URL` | — | relay 模式的服务器桥接地址 |
 | `WECLAW_SESSION_TAG` | — | `=false` 关闭多会话微信打标 `[xxxx]` |
 | `OPENCLAW_STATE_DIR` | — | 复用已有 openclaw 绑定（可选） |
