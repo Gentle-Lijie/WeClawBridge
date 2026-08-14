@@ -32,7 +32,7 @@
     font: inherit;
   }
   textarea { min-height: 70px; resize: vertical; }
-  .toggle { position: relative; width: 40px; height: 22px; flex: 0 0 auto; }
+  .toggle { position: relative; display: inline-block; width: 40px; height: 22px; flex: 0 0 auto; cursor: pointer; }
   .toggle input { opacity: 0; width: 0; height: 0; }
   .slider {
     position: absolute; inset: 0; background: #c8c2b3; border-radius: 22px; transition: .15s;
@@ -86,19 +86,19 @@
   <div class="card">
     <h2>事件开关</h2>
     <div class="row">
-      <label><b>任务完成摘要</b>（claude 停止时推送）<div class="sub">Stop → last_assistant_message</div></label>
-      <span class="toggle"><input id="notifyStop" type="checkbox"><span class="slider"></span></span>
+      <label for="notifyStop"><b>任务完成摘要</b>（claude 停止时推送）<div class="sub">Stop → last_assistant_message</div></label>
+      <label class="toggle" for="notifyStop"><input id="notifyStop" type="checkbox"><span class="slider"></span></label>
     </div>
     <div class="row">
       <label>摘要长度上限<input id="summaryLength" type="number" value="800"></label>
     </div>
     <div class="row">
-      <label><b>需要输入/确认</b>（权限请求、空闲等待）<div class="sub">Notification 事件</div></label>
-      <span class="toggle"><input id="notifyNotification" type="checkbox"><span class="slider"></span></span>
+      <label for="notifyNotification"><b>需要输入/确认</b>（权限请求、空闲等待）<div class="sub">Notification 事件</div></label>
+      <label class="toggle" for="notifyNotification"><input id="notifyNotification" type="checkbox"><span class="slider"></span></label>
     </div>
     <div class="row">
-      <label><b>回合制回复注入</b>（asyncRewake，微信回复→claude）<div class="sub">Stop 时检查 pending</div></label>
-      <span class="toggle"><input id="asyncRewake" type="checkbox"><span class="slider"></span></span>
+      <label for="asyncRewake"><b>回合制回复注入</b>（asyncRewake，微信回复→claude）<div class="sub">Stop 时检查 pending</div></label>
+      <label class="toggle" for="asyncRewake"><input id="asyncRewake" type="checkbox"><span class="slider"></span></label>
     </div>
   </div>
 
@@ -119,8 +119,8 @@
   <div class="card">
     <h2>免打扰时段</h2>
     <div class="row">
-      <label>启用免打扰</label>
-      <span class="toggle"><input id="quietEnabled" type="checkbox"><span class="slider"></span></span>
+      <label for="quietEnabled">启用免打扰</label>
+      <label class="toggle" for="quietEnabled"><input id="quietEnabled" type="checkbox"><span class="slider"></span></label>
     </div>
     <div class="grid2">
       <label>开始<input id="quietStart" type="text" value="23:00" placeholder="HH:MM"></label>
@@ -195,7 +195,10 @@ function show(msg, cls){ const s = $("status"); s.textContent = msg; s.className
 async function load(){
   try {
     const r = await fetch("/config", { headers: await authHeaders() });
-    if (!r.ok) throw new Error("HTTP " + r.status);
+    if (!r.ok) {
+      if (r.status === 401) throw new Error("HTTP 401 — 此面板需要 token：在地址栏 URL 末尾加 ?token=你的WECLAW_API_TOKEN 后重新打开");
+      throw new Error("HTTP " + r.status);
+    }
     fill(await r.json());
     show("已加载当前配置", "ok");
   } catch(e){ show("加载失败：" + e.message, "err"); }
