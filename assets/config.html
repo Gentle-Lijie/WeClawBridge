@@ -69,65 +69,86 @@
     #modeBanner.relay { background: #1d2a20; border-color: #33503a; color: #9fd0ac; }
     #modeBanner.bridge { background: #2d2416; border-color: #5c4a28; color: #e5c084; }
   }
+  .card.hero { padding: 22px 22px; }
+  .card.hero .row { margin: 0; align-items: center; }
+  .card.hero label:first-child { flex: 1; font-size: 16.5px; }
+  .toggle.big { width: 54px; height: 30px; }
+  .toggle.big .slider::before { width: 22px; height: 22px; top: 4px; left: 4px; }
+  .toggle.big input:checked + .slider::before { transform: translateX(24px); }
+  details.adv { margin: 0 0 16px; }
+  details.adv > summary {
+    cursor: pointer; list-style: none; user-select: none;
+    color: #5c5f59; font-size: 13.5px; padding: 8px 2px;
+  }
+  details.adv > summary::before { content: "▸ "; }
+  details.adv[open] > summary::before { content: "▾ "; }
+  details.adv > summary::-webkit-details-marker { display: none; }
+  @media (prefers-color-scheme: dark) { details.adv > summary { color: #9da1a0; } }
 </style>
 </head>
 <body>
 <div class="wrap">
   <h1>WeClawBridge · 推送规则</h1>
   <div id="modeBanner" class="relay"></div>
-  <div class="hint">配置哪些情况触发推送、哪些抑制。保存后立即生效（写入 <code>hooks.json</code>，<code>weclaw hook</code> 每次读取）。</div>
 
-  <div class="card">
-    <h2>目标</h2>
-    <div class="row"><label>推送目标 URL<input id="target" type="text" placeholder="http://127.0.0.1:4789"></label></div>
-    <div class="row"><label>Bearer Token（可选）<input id="token" type="text" placeholder="无 token 则留空"></label></div>
-  </div>
-
-  <div class="card">
-    <h2>事件开关</h2>
+  <div class="card hero">
     <div class="row">
-      <label for="notifyStop"><b>任务完成摘要</b>（claude 停止时推送）<div class="sub">Stop → last_assistant_message</div></label>
-      <label class="toggle" for="notifyStop"><input id="notifyStop" type="checkbox"><span class="slider"></span></label>
-    </div>
-    <div class="row">
-      <label>摘要长度上限<input id="summaryLength" type="number" value="800"></label>
-    </div>
-    <div class="row">
-      <label for="notifyNotification"><b>需要输入/确认</b>（权限请求、空闲等待）<div class="sub">Notification 事件</div></label>
-      <label class="toggle" for="notifyNotification"><input id="notifyNotification" type="checkbox"><span class="slider"></span></label>
-    </div>
-    <div class="row">
-      <label for="asyncRewake"><b>回合制回复注入</b>（asyncRewake，微信回复→claude）<div class="sub">Stop 时检查 pending</div></label>
-      <label class="toggle" for="asyncRewake"><input id="asyncRewake" type="checkbox"><span class="slider"></span></label>
+      <label for="notifyStop"><b>任务完成推送到微信</b><div class="sub">claude 停止时把最后回复摘要发给你（可回 /switch 切换会话）</div></label>
+      <label class="toggle big" for="notifyStop"><input id="notifyStop" type="checkbox"><span class="slider"></span></label>
     </div>
   </div>
 
-  <div class="card">
-    <h2>高危工具告警</h2>
-    <div class="sub" style="margin-bottom:8px">每行一条，权限规则语法，如 <code>Bash(git push *)</code>、<code>Bash(rm -rf *)</code></div>
-    <textarea id="highRiskTools" placeholder="Bash(git push *)&#10;Bash(rm -rf *)"></textarea>
-  </div>
+  <details class="adv">
+    <summary>高级设置（通知 / 回复注入 / 高危工具 / 过滤 / 免打扰 / 目标）</summary>
 
-  <div class="card">
-    <h2>关键词过滤</h2>
-    <div class="grid2">
-      <label>仅当包含这些词时推送（逗号分隔，留空=不限）<input id="includeKeywords" type="text" placeholder="error, 失败, done"></label>
-      <label>包含这些词时不推送（逗号分隔）<input id="excludeKeywords" type="text" placeholder="debug, typing"></label>
+    <div class="card">
+      <h2>事件开关</h2>
+      <div class="row">
+        <label>摘要长度上限<input id="summaryLength" type="number" value="800"></label>
+      </div>
+      <div class="row">
+        <label for="notifyNotification"><b>需要输入/确认</b>（权限请求、空闲等待）<div class="sub">Notification 事件</div></label>
+        <label class="toggle" for="notifyNotification"><input id="notifyNotification" type="checkbox"><span class="slider"></span></label>
+      </div>
+      <div class="row">
+        <label for="asyncRewake"><b>回合制回复注入</b>（asyncRewake，微信回复→claude）<div class="sub">Stop 时检查 pending</div></label>
+        <label class="toggle" for="asyncRewake"><input id="asyncRewake" type="checkbox"><span class="slider"></span></label>
+      </div>
     </div>
-  </div>
 
-  <div class="card">
-    <h2>免打扰时段</h2>
-    <div class="row">
-      <label for="quietEnabled">启用免打扰</label>
-      <label class="toggle" for="quietEnabled"><input id="quietEnabled" type="checkbox"><span class="slider"></span></label>
+    <div class="card">
+      <h2>高危工具告警</h2>
+      <div class="sub" style="margin-bottom:8px">每行一条，权限规则语法，如 <code>Bash(git push *)</code>、<code>Bash(rm -rf *)</code></div>
+      <textarea id="highRiskTools" placeholder="Bash(git push *)&#10;Bash(rm -rf *)"></textarea>
     </div>
-    <div class="grid2">
-      <label>开始<input id="quietStart" type="text" value="23:00" placeholder="HH:MM"></label>
-      <label>结束<input id="quietEnd" type="text" value="07:00" placeholder="HH:MM"></label>
+
+    <div class="card">
+      <h2>关键词过滤</h2>
+      <div class="grid2">
+        <label>仅当包含这些词时推送（逗号分隔，留空=不限）<input id="includeKeywords" type="text" placeholder="error, 失败, done"></label>
+        <label>包含这些词时不推送（逗号分隔）<input id="excludeKeywords" type="text" placeholder="debug, typing"></label>
+      </div>
     </div>
-    <div class="sub">该时段内（本地时间）所有推送被抑制；微信回复注入仍生效。</div>
-  </div>
+
+    <div class="card">
+      <h2>免打扰时段</h2>
+      <div class="row">
+        <label for="quietEnabled">启用免打扰</label>
+        <label class="toggle" for="quietEnabled"><input id="quietEnabled" type="checkbox"><span class="slider"></span></label>
+      </div>
+      <div class="grid2">
+        <label>开始<input id="quietStart" type="text" value="23:00" placeholder="HH:MM"></label>
+        <label>结束<input id="quietEnd" type="text" value="07:00" placeholder="HH:MM"></label>
+      </div>
+      <div class="sub">该时段内（本地时间）所有推送被抑制；微信回复注入仍生效。</div>
+    </div>
+
+    <div class="card">
+      <h2>目标</h2>
+      <div class="row"><label>推送目标 URL<input id="target" type="text" placeholder="http://127.0.0.1:4789"></label></div>
+      <div class="row"><label>Bearer Token（可选）<input id="token" type="text" placeholder="无 token 则留空"></label></div>
+    </div>
+  </details>
 
   <div class="actions">
     <button id="save">保存</button>
