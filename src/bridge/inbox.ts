@@ -89,8 +89,7 @@ export function routeInbound(ev: InboundEventLike, ctx: RouterContext): RouteRes
         const active = getActiveSession(ev.userId);
         const lines = remaining.map((s, i) =>
           `${i + 1}. ${s.label}  (${src(s.sessionId)})${mark(status.get(s.sessionId))}${s.sessionId === active ? " ← 当前" : ""}`);
-        note.push("❔ = 升级前的旧记录，可 /clear all 一并清掉");
-        return { handled: true, reply: `会话列表：\n${lines.join("\n")}\n${note.join("；")}\n用 /switch <序号> 切换` };
+        return { handled: true, reply: `会话列表：\n${lines.join("\n")}${note.length ? `\n${note.join("；")}` : ""}` };
       }
       // 选择：序号优先（最可靠），否则按前缀。重新探测保证序号与上次列表一致。
       const { remaining, status } = probeAndPruneSessions();

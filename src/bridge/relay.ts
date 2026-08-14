@@ -399,8 +399,7 @@ export class RelayServer {
       const active = getActiveSession(ev.userId);
       const lines = remaining.map((s, i) =>
         `${i + 1}. ${s.label}  (${src(s.sessionId)})${mark(status.get(s.sessionId))}${s.sessionId === active ? " ← 当前" : ""}`);
-      note.push("❔ = 升级前的旧记录，可 /clear all 一并清掉");
-      return `会话列表：\n${lines.join("\n")}\n${note.join("；")}\n/switch <序号> 切换`;
+      return `会话列表：\n${lines.join("\n")}${note.length ? `\n${note.join("；")}` : ""}`;
     }
 
     // Selection: re-probe so numbering matches the last listed (pruned) list.
