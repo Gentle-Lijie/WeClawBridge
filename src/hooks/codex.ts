@@ -104,7 +104,7 @@ const CODEX_EVENTS = ["SessionStart", "SessionEnd", "Stop", "PermissionRequest",
  * identical to Claude Code's (stdin JSON payload, PascalCase events, Stop exit-2
  * continue), so we register the SAME `weclaw hook` dispatcher and get:
  *   SessionStart → session route learning
- *   Stop         → completion summary + asyncRewake reply injection
+ *   Stop         → completion summary only (no asyncRewake — see below)
  *   PermissionRequest → permission-needed mirror to WeChat (Codex has no Notification)
  *   PostToolUse  → high-risk tool alert
  */
@@ -115,8 +115,10 @@ export function installCodexHooks(opts: { highRiskTools?: string[] } = {}): { fi
   const events: string[] = opts.highRiskTools && opts.highRiskTools.length > 0 ? [...CODEX_EVENTS] : CODEX_EVENTS.filter((e) => e !== "PostToolUse");
   const hooks: Record<string, unknown> = {};
   for (const ev of events) {
+    // No asyncRewake here: codex Stop hooks run synchronously and hold the
+    // turn (and the whole session slot) until they exit, so a reply-waiting
+    // Stop hook would block new sessions for the entire wait window.
     const entry = { type: "command", command: cmd };
-    if (ev === "Stop") Object.assign(entry, { asyncRewake: true, timeout: 540 });
     hooks[ev] = [{ matcher: "", hooks: [entry] }];
   }
   // Merge: keep unrelated events the user may have configured.

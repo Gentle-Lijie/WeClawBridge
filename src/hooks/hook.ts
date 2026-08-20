@@ -180,7 +180,13 @@ export async function runHook(): Promise<void> {
       const summary = payload.last_assistant_message.slice(0, cfg.summaryLength ?? 800);
       await maybePush(`✅ 任务完成：\n${summary}`, cfg, sid);
     }
-    if (cfg.asyncRewake && sid) {
+    // Codex runs Stop hooks synchronously: the turn (and the session slot)
+    // stays held until the hook exits, so waiting for a WeChat reply here
+    // would freeze the session for the whole window. Only Claude Code runs
+    // asyncRewake hooks in the background where waiting is free.
+    const hostComm = hostInfo()?.comm ?? "";
+    const rewakeCapable = !hostComm.includes("codex");
+    if (cfg.asyncRewake && sid && rewakeCapable) {
       // asyncRewake: the hook runs in the background after Stop. Poll the
       // pending file until a WeChat reply lands (or the wait window elapses),
       // then inject it as a system reminder via exit 2.
