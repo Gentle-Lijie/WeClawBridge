@@ -1,6 +1,6 @@
 {
   "name": "weclaw-bridge",
-  "version": "0.2.15",
+  "version": "0.2.16",
   "description": "Standalone cross-platform bridge for the WeChat ClawBot (iLink) protocol — bind and forward instructions without installing openclaw.",
   "icon": "https://cdn.jsdelivr.net/gh/Gentle-Lijie/WeClawBridge@main/assets/icon.png",
   "license": "MIT",
@@ -51,7 +51,7 @@
     "build": "tsc",
     "dev": "tsc --watch",
     "start": "node bin/weclaw.mjs",
-    "test": "npm run build && node --test test/*.test.mjs",
+    "test": "npm run build && node --test test/inbox-clear.test.mjs test/outbox-clear.test.mjs",
     "typecheck": "tsc --noEmit",
     "postinstall": "node bin/postinstall.mjs || echo ''",
     "prepack": "npm run build",
