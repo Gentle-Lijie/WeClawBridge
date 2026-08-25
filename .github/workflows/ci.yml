@@ -41,6 +41,9 @@ jobs:
       - name: Build
         run: npm run build
 
+      - name: Test
+        run: npm test
+
       - name: Smoke test — CLI help
         run: node bin/weclaw.mjs help
 

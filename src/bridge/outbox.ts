@@ -87,6 +87,24 @@ export class Outbox {
     return n;
   }
 
+  /** Discard every pending entry for an account. Returns the number removed. */
+  clearAccount(accountId: string): number {
+    const prefix = `${accountId}::`;
+    let discarded = 0;
+    for (const [key, q] of this.queues) {
+      if (!key.startsWith(prefix)) continue;
+      discarded += q.length;
+      // Clear in place so an in-flight flush holding this array stops after its
+      // current send. Removing only the Map entry would leave that flush alive.
+      q.length = 0;
+      this.queues.delete(key);
+    }
+    if (discarded > 0) {
+      this.log.info(`outbox cleared account=${accountId}; discarded=${discarded}`);
+    }
+    return discarded;
+  }
+
   snapshot(): OutboxEntry[] {
     return [...this.queues.values()].flat();
   }
@@ -129,7 +147,9 @@ export class Outbox {
           }
         }
       }
-      if (q.length === 0) this.queues.delete(key);
+      // A clear may have removed this queue and enqueue may already have
+      // installed a replacement for the same key. Never delete that new queue.
+      if (q.length === 0 && this.queues.get(key) === q) this.queues.delete(key);
     } finally {
       this.flushing.delete(key);
     }

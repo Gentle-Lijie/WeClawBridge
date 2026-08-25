@@ -9,11 +9,8 @@
 
 import { listAccountIds, loadAccount, contextTokenAgeSec } from "../store/account.js";
 import {
-  listSessions,
   setActiveSession,
   getActiveSession,
-  forgetSession,
-  clearAllSessions,
   probeAndPruneSessions,
 } from "../store/sessions.js";
 import type { Liveness } from "../store/liveness.js";
@@ -30,6 +27,8 @@ export interface RouterContext {
   allow?: string[];
   /** Monitor liveness + outbox depth, keyed by accountId. */
   monitorInfo?: (accountId: string) => { running: boolean; lastInboundAt: number | null; outboxPending: number };
+  /** Discard every pending outbox entry for an account. */
+  clearOutbox: (accountId: string) => number;
 }
 
 export interface RouteResult {
@@ -60,7 +59,7 @@ export function routeInbound(ev: InboundEventLike, ctx: RouterContext): RouteRes
           "/status   账号 + 监听 + token 新鲜度 + 队列",
           "/accounts 绑定的账号列表",
           "/switch   列出/切换当前活跃 claude 会话（自动清理已退出）",
-          "/clear <序号|all> 移除会话记录",
+          "/clear    清空当前账号的 outbox 待发消息",
           "/version  本机版本",
           "/ping     存活检测（回 pong）",
         ].join("\n"),
@@ -105,17 +104,16 @@ export function routeInbound(ev: InboundEventLike, ctx: RouterContext): RouteRes
       return { handled: true, reply: `已切换到 ${src(target.sessionId)} 会话 ${target.sessionId.slice(0, 14)}。\n后续回复将优先路由给它。` };
     }
     case "/clear": {
-      const arg = rest[0]?.trim();
-      if (arg === "all") {
-        const n = clearAllSessions();
-        return { handled: true, reply: n > 0 ? `已清空全部 ${n} 条会话记录（新会话会自动重新登记）。` : "本来就没有会话记录。" };
+      if (rest.length > 0) {
+        return { handled: true, reply: "用法：/clear（清空当前账号的 outbox 待发消息）" };
       }
-      const idx = Number(arg);
-      if (!idx) return { handled: true, reply: "用法：/clear <序号> 或 /clear all（先 /switch 看序号）" };
-      const target = listSessions()[idx - 1];
-      if (!target) return { handled: true, reply: `无序号 ${idx}` };
-      forgetSession(target.sessionId);
-      return { handled: true, reply: `已移除 ${target.label}` };
+      const discarded = ctx.clearOutbox(ev.accountId);
+      return {
+        handled: true,
+        reply: discarded > 0
+          ? `已丢弃当前账号 outbox 中 ${discarded} 条待重发消息。`
+          : "当前账号 outbox 没有待重发消息。",
+      };
     }
     case "/status": {
       const lines = listAccountIds().map((id) => {

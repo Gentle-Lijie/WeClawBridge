@@ -8,6 +8,7 @@
  *   GET  /status                 → accounts + monitor liveness
  *   GET  /accounts               → list bound accountIds
  *   POST /send                   → forward { text, to?, account? } to WeChat
+ *   POST /outbox/clear           → discard one account's pending retries
  *   POST /login/start            → begin QR login, returns { qrcodeUrl, sessionKey }
  *   POST /login/wait             → poll a started login to completion
  *
@@ -341,6 +342,7 @@ export class BridgeServer {
             const m = this.monitors.get(aid);
             return { running: m?.running ?? false, lastInboundAt: m?.lastInboundAt ?? null, outboxPending: this.outbox.pending(aid) };
           },
+          clearOutbox: (aid) => this.outbox.clearAccount(aid),
         });
         if (route.handled) {
           if (route.reason) this.opts.logger.info(`inbox: ${route.reason}`);
@@ -616,6 +618,10 @@ export class BridgeServer {
       return sendJson(res, 200, await this.handleSend(await readBody(req)));
     }
 
+    if (path === "/outbox/clear" && method === "POST") {
+      return sendJson(res, 200, this.handleOutboxClear(await readBody(req)));
+    }
+
     // Login endpoints can be shuttered for public deployments.
     if ((path === "/login/start" || path === "/login/wait") && method === "POST") {
       if (this.opts.disableLogin) {
@@ -645,6 +651,31 @@ export class BridgeServer {
       };
     });
     return { accounts };
+  }
+
+  private handleOutboxClear(bodyText: string): { ok: true; accountId: string; discarded: number } {
+    let body: unknown;
+    try {
+      body = JSON.parse(bodyText);
+    } catch {
+      throw new HttpError(400, "invalid JSON body");
+    }
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+      throw new HttpError(400, "JSON body must be an object");
+    }
+    const accountId = (body as { accountId?: unknown }).accountId;
+    if (typeof accountId !== "string" || !accountId.trim()) {
+      throw new HttpError(400, "accountId is required");
+    }
+    const normalized = accountId.trim();
+    if (!listAccountIds().includes(normalized)) {
+      throw new HttpError(404, `account ${normalized} not found`);
+    }
+    return {
+      ok: true,
+      accountId: normalized,
+      discarded: this.outbox.clearAccount(normalized),
+    };
   }
 
   private async handleSend(bodyText: string): Promise<unknown> {

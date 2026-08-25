@@ -162,7 +162,7 @@ export function forgetSession(sessionId: string): void {
   clearActiveSession(sessionId);
 }
 
-/** Remove every session record (bulk /clear all). Returns how many went. */
+/** Remove every session record. Returns how many went. */
 export function clearAllSessions(): number {
   const map = loadAll();
   const n = Object.keys(map).length;

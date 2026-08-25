@@ -20,8 +20,6 @@ import {
   setActiveSession,
   getActiveSession,
   probeAndPruneSessions,
-  forgetSession,
-  clearAllSessions,
 } from "../store/sessions.js";
 import { hostPatch, type HostFields, type Liveness } from "../store/liveness.js";
 import { routeAndAppend, consumePending } from "../store/pending.js";
@@ -322,7 +320,11 @@ export class RelayServer {
       const reply = await this.handleCommand(ev);
       if (reply) {
         try {
-          await this.forward("/send", "POST", JSON.stringify({ text: reply }));
+          await this.forward("/send", "POST", JSON.stringify({
+            text: reply,
+            account: ev.accountId,
+            to: ev.userId,
+          }));
         } catch (err) {
           this.log.warn(`command reply failed: ${String(err)}`);
         }
@@ -349,7 +351,7 @@ export class RelayServer {
           "/status   账号+监听+token+队列",
           "/accounts 绑定账号",
           "/switch   列出/切换会话（自动清理已退出）",
-          "/clear <序号|all> 移除会话记录",
+          "/clear    清空当前账号的 outbox 待发消息",
           "/version  电脑端 + 服务器端版本",
           "/ping     存活检测",
         ].join("\n");
@@ -363,7 +365,7 @@ export class RelayServer {
       case "/switch":
         return this.cmdSwitch(ev, rest);
       case "/clear":
-        return this.cmdClear(rest);
+        return await this.cmdClear(ev, rest);
       case "/status":
         return await this.proxyJson("/status", (data) => {
           const accts = (data.accounts as Record<string, unknown>[] | undefined) ?? [];
@@ -413,18 +415,30 @@ export class RelayServer {
     return `已切换到 ${target.label} (${src(target.sessionId)})。\n后续回复将优先路由给它。`;
   }
 
-  /** /clear <序号|all> — manual removal (legacy unknown entries etc.). */
-  private cmdClear(rest: string[]): string {
-    const arg = rest[0]?.trim();
-    if (arg === "all") {
-      const n = clearAllSessions();
-      return n > 0 ? `已清空全部 ${n} 条会话记录（新会话会自动重新登记）。` : "本来就没有会话记录。";
+  /** /clear — discard every Bridge outbox entry for the inbound account. */
+  private async cmdClear(ev: InboundEvent, rest: string[]): Promise<string> {
+    if (rest.length > 0) return "用法：/clear（清空当前账号的 outbox 待发消息）";
+    if (!ev.accountId.trim()) return "清理失败：入站事件缺少 accountId。";
+
+    const up = await this.forward(
+      "/outbox/clear",
+      "POST",
+      JSON.stringify({ accountId: ev.accountId }),
+    );
+    if (up.status !== 200) return `清理失败（HTTP ${up.status}）`;
+
+    try {
+      const data = JSON.parse(up.body) as { ok?: unknown; discarded?: unknown };
+      if (data.ok !== true || !Number.isInteger(data.discarded) || (data.discarded as number) < 0) {
+        return "清理失败：服务器响应格式异常。";
+      }
+      const discarded = data.discarded as number;
+      return discarded > 0
+        ? `已丢弃当前账号 outbox 中 ${discarded} 条待重发消息。`
+        : "当前账号 outbox 没有待重发消息。";
+    } catch {
+      return "清理失败：无法解析服务器响应。";
     }
-    if (!arg || !/^\d+$/.test(arg)) return "用法：/clear <序号> 或 /clear all（先 /switch 看序号）";
-    const target = listSessions()[Number(arg) - 1];
-    if (!target) return `无序号 ${arg}`;
-    forgetSession(target.sessionId);
-    return `已移除 ${target.label}`;
   }
 
   /** Proxy a GET to the upstream and format the JSON via `fmt`. */
