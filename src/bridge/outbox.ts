@@ -20,6 +20,9 @@ import {
 } from "../store/account.js";
 import { Logger } from "../util/log.js";
 
+/** Where a parked send came from — agent sessions vs third-party webhook pushes. */
+export type OutboxSource = "agent" | "webhook";
+
 export interface OutboxEntry extends SendTextParams {
   id: string;
   accountId: string;
@@ -27,6 +30,7 @@ export interface OutboxEntry extends SendTextParams {
   attempts: number;
   /** cap retries to avoid looping forever on permanent failures */
   maxAttempts: number;
+  source: OutboxSource;
 }
 
 interface OutboxOptions {
@@ -56,7 +60,7 @@ export class Outbox {
   }
 
   /** Park a failed send for later retry. Returns the entry id. */
-  enqueue(accountId: string, params: SendTextParams, reason: string): string {
+  enqueue(accountId: string, params: SendTextParams, reason: string, source: OutboxSource = "webhook"): string {
     const id = `ob:${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const entry: OutboxEntry = {
       id,
@@ -65,6 +69,7 @@ export class Outbox {
       attempts: 0,
       maxAttempts: MAX_ATTEMPTS_DEFAULT,
       ...params,
+      source,
     };
     const key = this.key(accountId, params.to);
     let q = this.queues.get(key);
@@ -87,20 +92,26 @@ export class Outbox {
     return n;
   }
 
-  /** Discard every pending entry for an account. Returns the number removed. */
-  clearAccount(accountId: string): number {
+  /** Discard pending entries for an account, optionally limited to the given
+   *  sources (e.g. ["agent"] keeps webhook pushes parked). Returns the number removed. */
+  clearAccount(accountId: string, sources?: readonly OutboxSource[]): number {
     const prefix = `${accountId}::`;
     let discarded = 0;
     for (const [key, q] of this.queues) {
       if (!key.startsWith(prefix)) continue;
-      discarded += q.length;
-      // Clear in place so an in-flight flush holding this array stops after its
-      // current send. Removing only the Map entry would leave that flush alive.
-      q.length = 0;
-      this.queues.delete(key);
+      // Remove matching entries in place so an in-flight flush holding this
+      // array stops after its current send. Removing only the Map entry would
+      // leave that flush alive.
+      for (let i = q.length - 1; i >= 0; i--) {
+        if (!sources || sources.includes(q[i].source)) {
+          q.splice(i, 1);
+          discarded += 1;
+        }
+      }
+      if (q.length === 0) this.queues.delete(key);
     }
     if (discarded > 0) {
-      this.log.info(`outbox cleared account=${accountId}; discarded=${discarded}`);
+      this.log.info(`outbox cleared account=${accountId}; discarded=${discarded}${sources ? ` sources=${sources.join(",")}` : ""}`);
     }
     return discarded;
   }
@@ -124,9 +135,15 @@ export class Outbox {
         const client = this.clientFor(accountId);
         if (!client) break;
         entry.attempts += 1;
+        // Remove by identity, not shift(): a concurrent filtered clear may have
+        // spliced this entry out mid-send, and shift() would drop the new head.
+        const remove = () => {
+          const idx = q.indexOf(entry);
+          if (idx >= 0) q.splice(idx, 1);
+        };
         try {
           await sendText(client, { ...entry, contextToken: token });
-          q.shift();
+          remove();
           this.log.info(`outbox delivered ${entry.id} (attempt ${entry.attempts})`);
         } catch (err) {
           if (err instanceof SendError && (err.kind === "prepare_failed" || err.kind === "stale_token")) {
@@ -138,7 +155,7 @@ export class Outbox {
           }
           // transient/network/rejected → drop or keep?
           if (entry.attempts >= entry.maxAttempts) {
-            q.shift();
+            remove();
             this.log.error(`outbox dropping ${entry.id} after ${entry.attempts} attempts: ${String(err)}`);
           } else {
             this.log.warn(`outbox retry ${entry.id} failed (attempt ${entry.attempts}): ${String(err)}`);

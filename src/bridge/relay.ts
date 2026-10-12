@@ -351,7 +351,7 @@ export class RelayServer {
           "/status   账号+监听+token+队列",
           "/accounts 绑定账号",
           "/switch   列出/切换会话（自动清理已退出）",
-          "/clear    清空当前账号的 outbox 待发消息",
+          "/clear    清空当前账号 outbox 的 agent 待发消息（webhook 推送不受影响）",
           "/version  电脑端 + 服务器端版本",
           "/ping     存活检测",
         ].join("\n");
@@ -415,27 +415,33 @@ export class RelayServer {
     return `已切换到 ${target.label} (${src(target.sessionId)})。\n后续回复将优先路由给它。`;
   }
 
-  /** /clear — discard every Bridge outbox entry for the inbound account. */
+  /** /clear — discard the account's agent outbox entries; webhook pushes stay parked. */
   private async cmdClear(ev: InboundEvent, rest: string[]): Promise<string> {
-    if (rest.length > 0) return "用法：/clear（清空当前账号的 outbox 待发消息）";
+    if (rest.length > 0) return "用法：/clear（清空当前账号 outbox 的 agent 待发消息，webhook 推送不受影响）";
     if (!ev.accountId.trim()) return "清理失败：入站事件缺少 accountId。";
 
     const up = await this.forward(
       "/outbox/clear",
       "POST",
-      JSON.stringify({ accountId: ev.accountId }),
+      JSON.stringify({ accountId: ev.accountId, sources: ["agent"] }),
     );
     if (up.status !== 200) return `清理失败（HTTP ${up.status}）`;
 
     try {
-      const data = JSON.parse(up.body) as { ok?: unknown; discarded?: unknown };
+      const data = JSON.parse(up.body) as { ok?: unknown; discarded?: unknown; kept?: unknown };
       if (data.ok !== true || !Number.isInteger(data.discarded) || (data.discarded as number) < 0) {
         return "清理失败：服务器响应格式异常。";
       }
       const discarded = data.discarded as number;
-      return discarded > 0
-        ? `已丢弃当前账号 outbox 中 ${discarded} 条待重发消息。`
-        : "当前账号 outbox 没有待重发消息。";
+      const kept = Number.isInteger(data.kept) ? (data.kept as number) : 0;
+      if (discarded > 0) {
+        return kept > 0
+          ? `已丢弃当前账号 outbox 中 ${discarded} 条 agent 待发消息（保留 ${kept} 条 webhook 消息）。`
+          : `已丢弃当前账号 outbox 中 ${discarded} 条 agent 待发消息（webhook 推送不受影响）。`;
+      }
+      return kept > 0
+        ? `当前账号 outbox 没有 agent 待发消息（保留 ${kept} 条 webhook 消息）。`
+        : "当前账号 outbox 没有 agent 待发消息。";
     } catch {
       return "清理失败：无法解析服务器响应。";
     }

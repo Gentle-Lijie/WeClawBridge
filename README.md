@@ -28,7 +28,7 @@ WeClawBridge 重新实现了 `@tencent-weixin/openclaw-weixin` 插件所用的 i
 - ✅ **Claude Code Hooks**：`weclaw hooks install` 一键注册 Stop / Notification / 高危工具事件，自动推送到微信
 - ✅ **本地 relay / 一键远程部署**：claude 在本地、桥接在服务器时，`weclaw relay` 做双向中继；`weclaw deploy --ssh` 一键把桥接部署到你自己的服务器（装运行时、迁凭证、nginx 反代、systemd）
 - ✅ **推送规则配置面板**：浏览器打开 `weclaw config`，可视化配置事件开关 / 高危工具 / 关键词过滤 / 免打扰时段
-- ✅ **入站指令**：在微信里给 bot 发 `/help` `/status` `/accounts` `/ping` `/switch` `/clear` `/version`，直接收到回复；`/clear` 会丢弃当前机器人账号的全部 outbox 待重发消息
+- ✅ **入站指令**：在微信里给 bot 发 `/help` `/status` `/accounts` `/ping` `/switch` `/clear` `/version`，直接收到回复；`/clear` 只丢弃当前机器人账号 outbox 中来自 agent 会话的待重发消息，webhook 推送不受影响
 - ✅ **自愈与安全**：`context_token` 失效自动入队重发、出站密钥脱敏、IP 白名单、速率限制、消息归档检索
 - ✅ **开机自启**：`weclaw service install` 自动生成 systemd / launchd / 计划任务
 - ✅ **Claude Code Skill**：自带一个自愈型 skill `/weclaw-bridge`
@@ -172,13 +172,13 @@ weclaw service uninstall                               # 卸载
 | POST | `/config` | `{...}` | 保存推送规则 |
 | POST | `/routes` | `{"session","userId"?,"account"?}` | 注册 claude 会话（SessionStart） |
 | POST | `/send` | `{"text","to"?,"account"?,"session"?}` | 转发文字到微信（自动脱敏/分块；失败入队） |
-| POST | `/outbox/clear` | `{"accountId"}` | 清空指定已绑定账号的 Bridge outbox（Relay 内部使用） |
+| POST | `/outbox/clear` | `{"accountId","sources"?}` | 清空指定已绑定账号的 Bridge outbox（Relay 内部使用；默认只清 `agent`，`sources` 可传 `["agent","webhook"]`） |
 | POST | `/login/start` | — | 拉取二维码，返回 `{qrcodeUrl, sessionKey}`（可关闭） |
 | POST | `/login/wait` | `{"sessionKey","verifyCode"?}` | 轮询登录状态 |
 
 鉴权：设置 `WECLAW_API_TOKEN` 后，除 `/health`、`/`、`/events` 外需 `Authorization: Bearer <token>`（仅 header，不接受 query）。`/outbox/clear` 同时受现有 IP 白名单保护。
 
-`/clear` 使用入站事件所属的机器人账号，丢弃该账号下所有微信用户的 Bridge outbox 待重发消息并返回数量；它不会删除会话登记、active session、pending 回复或 Relay 断线期间的 `outCache`。
+`/clear` 使用入站事件所属的机器人账号，丢弃该账号下所有微信用户的 outbox 中来自 agent 会话（`/send` 带 `session`）的待重发消息并返回数量；webhook 推送（无 `session` 的 `/send`）不受影响，继续等待重发。它不会删除会话登记、active session、pending 回复或 Relay 断线期间的 `outCache`。
 
 错误码：`400` 参数错误 · `401` 未授权 · `404` 未绑定账号 · `409` 账号未配置 · `502` 发送失败（`ret=-2 prepare failed` 多为缺 `context_token`；`errcode=-14` 为 token 失效需重新登录）。
 
@@ -331,7 +331,7 @@ claude
 # → claude 在终端被唤醒，把你的回复当作指令继续执行
 ```
 
-**多会话**：每个 claude 会话首次 `/send` 时自动登记（绑定到你的微信），并记录其宿主进程（pid + 启动指纹）。`/switch` 在微信里列出/切换当前活跃会话，**列出时会探测每个会话的进程存活**——已退出的自动清理（含被 kill / 崩溃而没触发 SessionEnd 的孤儿），旧的无 PID 记录按现有过期规则自动清理；非命令回复会路由到当前活跃会话的 pending 队列（活跃会话进程已死时自动回落到普通匹配）。`/clear` 只清空当前机器人账号的 outbox 待重发消息，不影响这些会话记录。`/version` 显示电脑端与服务器端版本号。
+**多会话**：每个 claude 会话首次 `/send` 时自动登记（绑定到你的微信），并记录其宿主进程（pid + 启动指纹）。`/switch` 在微信里列出/切换当前活跃会话，**列出时会探测每个会话的进程存活**——已退出的自动清理（含被 kill / 崩溃而没触发 SessionEnd 的孤儿），旧的无 PID 记录按现有过期规则自动清理；非命令回复会路由到当前活跃会话的 pending 队列（活跃会话进程已死时自动回落到普通匹配）。`/clear` 只清空当前机器人账号 outbox 中来自 agent 会话的待重发消息（webhook 推送不受影响），不影响这些会话记录。`/version` 显示电脑端与服务器端版本号。
 
 > 注：`asyncRewake` 在 `claude -p`（headless）模式下会在结束时被回收；**双向回复注入需用交互式 `claude` 会话**。
 

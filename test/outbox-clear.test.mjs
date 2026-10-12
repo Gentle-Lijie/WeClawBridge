@@ -31,6 +31,20 @@ test("clearAccount discards every user queue for one account", () => {
   assert.equal(outbox.clearAccount("account-a"), 0);
 });
 
+test("clearAccount with a source filter only discards matching entries", () => {
+  const outbox = new Outbox({ clientFor: () => null });
+  outbox.enqueue("account-f", { to: "user-1", text: "agent-1" }, "test", "agent");
+  outbox.enqueue("account-f", { to: "user-1", text: "hook-1" }, "test", "webhook");
+  outbox.enqueue("account-f", { to: "user-2", text: "hook-2" }, "test"); // default source
+  outbox.enqueue("account-f", { to: "user-2", text: "agent-2" }, "test", "agent");
+
+  assert.equal(outbox.clearAccount("account-f", ["agent"]), 2);
+  assert.deepEqual(outbox.snapshot().map((entry) => entry.text), ["hook-1", "hook-2"]);
+  // No filter → clears everything that's left.
+  assert.equal(outbox.clearAccount("account-f"), 2);
+  assert.equal(outbox.pending("account-f"), 0);
+});
+
 test("an in-flight flush cannot send old tail entries or delete a replacement queue", async () => {
   const accountId = "account-race";
   const userId = "user-race";

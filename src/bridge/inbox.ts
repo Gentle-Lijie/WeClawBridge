@@ -27,7 +27,7 @@ export interface RouterContext {
   allow?: string[];
   /** Monitor liveness + outbox depth, keyed by accountId. */
   monitorInfo?: (accountId: string) => { running: boolean; lastInboundAt: number | null; outboxPending: number };
-  /** Discard every pending outbox entry for an account. */
+  /** Discard pending agent outbox entries for an account (webhook pushes stay). */
   clearOutbox: (accountId: string) => number;
 }
 
@@ -59,7 +59,7 @@ export function routeInbound(ev: InboundEventLike, ctx: RouterContext): RouteRes
           "/status   账号 + 监听 + token 新鲜度 + 队列",
           "/accounts 绑定的账号列表",
           "/switch   列出/切换当前活跃 claude 会话（自动清理已退出）",
-          "/clear    清空当前账号的 outbox 待发消息",
+          "/clear    清空当前账号 outbox 的 agent 待发消息（webhook 推送不受影响）",
           "/version  本机版本",
           "/ping     存活检测（回 pong）",
         ].join("\n"),
@@ -105,14 +105,14 @@ export function routeInbound(ev: InboundEventLike, ctx: RouterContext): RouteRes
     }
     case "/clear": {
       if (rest.length > 0) {
-        return { handled: true, reply: "用法：/clear（清空当前账号的 outbox 待发消息）" };
+        return { handled: true, reply: "用法：/clear（清空当前账号 outbox 的 agent 待发消息，webhook 推送不受影响）" };
       }
       const discarded = ctx.clearOutbox(ev.accountId);
       return {
         handled: true,
         reply: discarded > 0
-          ? `已丢弃当前账号 outbox 中 ${discarded} 条待重发消息。`
-          : "当前账号 outbox 没有待重发消息。",
+          ? `已丢弃当前账号 outbox 中 ${discarded} 条 agent 待发消息（webhook 推送不受影响）。`
+          : "当前账号 outbox 没有 agent 待发消息。",
       };
     }
     case "/status": {

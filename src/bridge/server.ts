@@ -8,7 +8,7 @@
  *   GET  /status                 → accounts + monitor liveness
  *   GET  /accounts               → list bound accountIds
  *   POST /send                   → forward { text, to?, account? } to WeChat
- *   POST /outbox/clear           → discard one account's pending retries
+ *   POST /outbox/clear           → discard one account's pending retries (agent-only by default)
  *   POST /login/start            → begin QR login, returns { qrcodeUrl, sessionKey }
  *   POST /login/wait             → poll a started login to completion
  *
@@ -22,7 +22,7 @@ import type { AddressInfo } from "node:net";
 import { IlinkClient, DEFAULT_BASE_URL } from "../ilink/client.js";
 import { sendText, SendError } from "./send.js";
 import { runMonitor } from "./monitor.js";
-import { Outbox } from "./outbox.js";
+import { Outbox, type OutboxSource } from "./outbox.js";
 import { redact } from "../util/redact.js";
 import { chunkText } from "../util/text.js";
 import { routeInbound, parseAllowList } from "./inbox.js";
@@ -342,7 +342,7 @@ export class BridgeServer {
             const m = this.monitors.get(aid);
             return { running: m?.running ?? false, lastInboundAt: m?.lastInboundAt ?? null, outboxPending: this.outbox.pending(aid) };
           },
-          clearOutbox: (aid) => this.outbox.clearAccount(aid),
+          clearOutbox: (aid) => this.outbox.clearAccount(aid, ["agent"]),
         });
         if (route.handled) {
           if (route.reason) this.opts.logger.info(`inbox: ${route.reason}`);
@@ -653,7 +653,7 @@ export class BridgeServer {
     return { accounts };
   }
 
-  private handleOutboxClear(bodyText: string): { ok: true; accountId: string; discarded: number } {
+  private handleOutboxClear(bodyText: string): { ok: true; accountId: string; sources: OutboxSource[]; discarded: number; kept: number } {
     let body: unknown;
     try {
       body = JSON.parse(bodyText);
@@ -671,10 +671,23 @@ export class BridgeServer {
     if (!listAccountIds().includes(normalized)) {
       throw new HttpError(404, `account ${normalized} not found`);
     }
+    // Optional source filter, e.g. {"sources":["agent"]}. Defaults to clearing
+    // only agent messages so webhook pushes stay parked for redelivery.
+    const VALID_SOURCES: OutboxSource[] = ["agent", "webhook"];
+    const rawSources = (body as { sources?: unknown }).sources;
+    const sources: OutboxSource[] = Array.isArray(rawSources)
+      ? rawSources.filter((s): s is OutboxSource => VALID_SOURCES.includes(s as OutboxSource))
+      : ["agent"];
+    if (Array.isArray(rawSources) && rawSources.length > 0 && sources.length === 0) {
+      throw new HttpError(400, "sources must be a subset of [\"agent\",\"webhook\"]");
+    }
+    const discarded = this.outbox.clearAccount(normalized, sources);
     return {
       ok: true,
       accountId: normalized,
-      discarded: this.outbox.clearAccount(normalized),
+      sources,
+      discarded,
+      kept: this.outbox.pending(normalized),
     };
   }
 
@@ -718,6 +731,9 @@ export class BridgeServer {
       throw new HttpError(400, String(err instanceof Error ? err.message : err));
     }
     // Learn the claude session ↔ WeChat user binding so inbound replies route back.
+    // A send carrying a session id comes from an agent (claude/codex hook); bare
+    // webhook pushes have none — /clear only drops the former.
+    const source: OutboxSource = typeof body.session === "string" && body.session ? "agent" : "webhook";
     if (typeof body.session === "string" && body.session) {
       touchSession(body.session, { userId: to, accountId: account.accountId, ...hostPatch(body) });
     }
@@ -742,7 +758,7 @@ export class BridgeServer {
       if (err instanceof SendError && (err.kind === "prepare_failed" || err.kind === "stale_token")) {
         // Missing / expired session: park the message and wait for a fresh capture.
         markContextTokenStale(account.accountId, to, true);
-        const id = this.outbox.enqueue(account.accountId, { to, text: safeText, contextToken }, err.kind);
+        const id = this.outbox.enqueue(account.accountId, { to, text: safeText, contextToken }, err.kind, source);
         archive({ dir: "out", accountId: account.accountId, userId: to, text: safeText, status: "queued" });
         const hint =
           err.kind === "stale_token"
